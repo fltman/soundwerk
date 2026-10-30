@@ -1,0 +1,62 @@
+// Turns a rig into questions for a decision model, and its answer into a move.
+// The model says how well each move suits the moment; the choice is then drawn
+// from those odds, so the same moment doesn't always get the same answer, and a
+// move that has been on for a long time slowly loses out.
+
+const SHARPEN = 1.5;    // favours the moves the model likes most
+const RECENT_PENALTY = 0.4;
+const STAY_BAND = 0.75; // an ordered group moves only when the music is this far from where it is
+
+export function questionsFor(groups) {
+  const out = {};
+  for (const g of groups) {
+    const told = (m) => (m.test?.measured ? `${m.description} (Measured against home: ${m.test.measured}.)` : m.description);
+    out[g.name] = g.ordered
+      ? { type: 'score', instructions: g.question, criteria: g.moves.map((m) => `${m.name}: ${told(m)}`) }
+      : { type: 'choice', instructions: g.question, criteria: Object.fromEntries(g.moves.map((m) => [m.name, told(m)])) };
+  }
+  return out;
+}
+
+// Where a bar falls in the arc of the set, which goes round and round
+export function sectionAt(arc, bar) {
+  const total = arc.reduce((s, x) => s + x.bars, 0);
+  let at = ((bar % total) + total) % total;
+  for (const [i, s] of arc.entries()) {
+    if (at < s.bars) return { name: s.name, into: at, left: s.bars - at, next: arc[(i + 1) % arc.length].name };
+    at -= s.bars;
+  }
+  return null;
+}
+
+// Does this group decide before `section.into`? Phrases count from the start of the section.
+export const isDue = (group, section) => (group.on_section && section.into === 0) || section.into % group.every === 0;
+
+// → { move, odds: { name: 0..1 } }. move is null when the group should stay as it is.
+export function pickMove(group, answer, { current, heldBars = 0, recent = [], random = Math.random }) {
+  if (group.ordered) {
+    const score = Number(answer?.score);
+    if (!Number.isFinite(score)) return { move: null, odds: {} };
+    const level = Math.max(0, Math.min(group.moves.length - 1, Math.round(score)));
+    const at = group.moves.findIndex((m) => m.name === current);
+    const odds = Object.fromEntries(group.moves.map((m, i) => [m.name, answer.probabilities?.[i] ?? 0]));
+    if (at >= 0 && Math.abs(score - at) < STAY_BAND) return { move: null, odds };
+    return { move: level === at ? null : group.moves[level], odds };
+  }
+  const given = answer?.probabilities;
+  if (!given) return { move: null, odds: {} };
+  const weights = group.moves.map((m) => {
+    let w = Math.max(Number(given[m.name]) || 0, 0.01) ** SHARPEN;
+    if (m.name === current) w *= 0.5 ** (heldBars / (group.every * 2));
+    else if (recent.includes(m.name)) w *= RECENT_PENALTY;
+    return w;
+  });
+  const total = weights.reduce((s, w) => s + w, 0);
+  let roll = random() * total;
+  let move = group.moves[group.moves.length - 1];
+  for (let i = 0; i < weights.length; i++) {
+    roll -= weights[i];
+    if (roll < 0) { move = group.moves[i]; break; }
+  }
+  return { move: move.name === current ? null : move, odds: { ...given } };
+}

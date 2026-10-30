@@ -1,0 +1,25 @@
+{
+  "name": "soundwerk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A wall of synthesizers, oscilloscopes, sequencers and patch cables in the browser: a modular synth for techno and acid.",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "smoke": "node test/smoke.mjs",
+    "interact": "node test/interact.mjs",
+    "presets": "node test/presets.mjs",
+    "perf": "node test/perf.mjs",
+    "ai-live": "node test/ai-live.mjs",
+    "dj": "node test/dj-live.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fltman/soundwerk"
+  }
+}

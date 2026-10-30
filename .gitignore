@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.*
+vault/
+.obsidian/
+.DS_Store
+test/out/

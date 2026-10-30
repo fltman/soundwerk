@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Soundwerk — a wall of synthesizers</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo"></span> SOUNDWERK</div>
+    <nav class="tabs">
+      <button data-tab="wall" class="active">Wall</button>
+      <button data-tab="code">DSP</button>
+    </nav>
+    <button id="add-btn" class="btn accent" title="Add a module (Tab)">+ Module</button>
+    <button id="ai-btn" class="btn ai" title="Describe a sound and let the assistant patch it (⌘K)">✦ AI</button>
+    <button id="dj-btn" class="btn dj-toggle" title="Let a decision model perform this patch, live">◉ DJ</button>
+
+    <div class="transport">
+      <button id="play" class="btn play" title="Start and stop every clock (Space)">▶</button>
+      <canvas id="tempo" class="tempo" width="176" height="60" title="Drag to change the tempo"></canvas>
+      <canvas id="master-meter" class="master-meter" width="240" height="36"></canvas>
+      <button id="rec" class="btn" title="Record what you hear to a WAV file">● REC</button>
+      <span id="rec-time" class="rec-time hidden"></span>
+    </div>
+
+    <div class="spacer"></div>
+    <span id="load" class="load" title="Share of the audio deadline in use, and any dropouts since the start"></span>
+    <div class="zoom">
+      <button id="zoom-out" class="btn" title="Zoom out (−)">−</button>
+      <button id="zoom-level" class="btn" title="Fit the whole wall on screen (F)">100 %</button>
+      <button id="zoom-in" class="btn" title="Zoom in (+). Double-click a module to fill the screen with it">+</button>
+    </div>
+    <button id="cables-btn" class="btn" title="Cables: solid, faint, hidden (C)">Cables</button>
+    <label class="field">Example
+      <select id="examples"></select>
+    </label>
+    <button id="undo" class="btn icon" title="Undo (⌘Z)">↶</button>
+    <button id="redo" class="btn icon" title="Redo (⇧⌘Z)">↷</button>
+    <button id="save" class="btn" title="Download this patch as JSON">Save</button>
+    <button id="open" class="btn" title="Open a patch JSON">Open</button>
+    <input id="open-file" type="file" accept=".json,application/json" hidden>
+  </header>
+
+  <main>
+    <div id="wall"></div>
+    <div id="code" class="code-panel hidden">
+      <div class="code-head">
+        <span id="code-title">Select a module</span>
+        <span class="spacer"></span>
+        <button id="code-fork" class="btn hidden" title="Copy this module into an editable Code module">Fork to Code module</button>
+      </div>
+      <div class="code-body">
+        <pre id="code-gutter" class="gutter"></pre>
+        <textarea id="code-text" spellcheck="false" readonly></textarea>
+      </div>
+      <div id="code-errors" class="code-errors"></div>
+    </div>
+    <aside id="dj" class="dj hidden">
+      <div class="dj-head">
+        <span class="dj-title">◉ Live DJ</span>
+        <button id="dj-start" class="btn small accent">Start</button>
+        <button id="dj-build" class="btn small" title="Ask the assistant to build a rig for this patch">Build rig…</button>
+        <span id="dj-status" class="dj-status"></span>
+        <span class="spacer"></span>
+        <span id="dj-meta" class="dj-meta"></span>
+        <button id="dj-close" class="btn small" title="Close">✕</button>
+      </div>
+      <div id="dj-groups" class="dj-groups"></div>
+    </aside>
+    <aside id="chat" class="chat hidden">
+      <div class="chat-head">
+        <span class="chat-title">✦ Patch assistant</span>
+        <span class="spacer"></span>
+        <button id="chat-new" class="btn small" title="Start a new conversation">New chat</button>
+        <button id="chat-close" class="btn small" title="Close (⌘K)">✕</button>
+      </div>
+      <div id="chat-log" class="chat-log"></div>
+      <form id="chat-form" class="chat-form">
+        <textarea id="chat-input" rows="3" placeholder="Describe the sound you want…" spellcheck="false"></textarea>
+        <button id="chat-send" class="btn accent" type="submit">Send</button>
+      </form>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <div id="drop" class="drop hidden">Drop a track, a sample or a patch</div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
