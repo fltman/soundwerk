@@ -24,11 +24,16 @@ const clone = (graph) => { const g = new Graph(); g.load(graph.toJSON()); return
 
 // Plays a move on a patch and remembers how to take it back. skip leaves ops for the caller to do.
 export function enterMove(graph, move, skip = () => false) {
-  const before = [...graph.links.values()].map((l) => ({ ...l, depth: graph.nodes.get(l.to)?.depth[l.toPort] }));
+  const before = [...graph.links.values()].map((l) => ({ ...l }));
+  const depths = new Map([...graph.nodes].map(([id, n]) => [id, { ...n.depth }]));
   const { added, log } = applyOps(graph, move.ops.filter((op) => !skip(op)));
   const made = [...graph.links.keys()].filter((id) => !before.some((l) => l.id === id));
   const lost = before.filter((l) => !graph.links.has(l.id));
-  return { move: move.name, nodes: added, made, lost, log };
+  // what each replugged jack's depth was, including none at all, so it goes back with the cable
+  const depth = [...lost, ...made.map((id) => graph.links.get(id))]
+    .filter((l) => depths.has(l.to))
+    .map(({ to, toPort }) => ({ to, toPort, depth: depths.get(to)[toPort] }));
+  return { move: move.name, nodes: added, made, lost, depth, log };
 }
 
 export function leaveMove(graph, held) {
@@ -38,7 +43,10 @@ export function leaveMove(graph, held) {
   for (const l of held.lost) {
     if (!graph.nodes.has(l.from) || !graph.nodes.has(l.to) || graph.linkInto(l.to, l.toPort)) continue;
     graph.connect(l.from, l.fromPort, l.to, l.toPort);
-    if (l.depth !== undefined) graph.setDepth(l.to, l.toPort, l.depth);
+  }
+  for (const { to, toPort, depth } of held.depth ?? held.lost) {   // older patches kept it on the cable
+    if (depth === undefined) graph.clearDepth(to, toPort);
+    else graph.setDepth(to, toPort, depth);
   }
 }
 
@@ -71,7 +79,8 @@ function tidyOp(graph, op) {
   for (const [name, value] of Object.entries(op.params ?? {})) {
     try { params[name] = coerce(graph.def(node), name, value); } catch { params[name] = value; }
   }
-  return { op: 'set', id, params, depth: { ...op.depth } };
+  const depth = Object.fromEntries(Object.entries(op.depth ?? {}).map(([k, v]) => [k, Math.max(-1, Math.min(1, Number(v) || 0))]));
+  return { op: 'set', id, params, depth };
 }
 
 function checkMove(base, group, m, first, seen, problems) {
@@ -94,8 +103,14 @@ function checkMove(base, group, m, first, seen, problems) {
   // a trial run on a copy says everything a real one would
   const trial = clone(base);
   const held = enterMove(trial, move);
-  for (const line of held.log) if (line.startsWith('✗')) problems.push(`${where}: ${line.replace(/^✗ #(\d+) (\w+): /, 'op $1 $2: ')}`);
-  const jacks = new Set([...held.lost.map((l) => `${l.to}.${l.toPort}`), ...held.made.map((id) => { const l = trial.links.get(id); return `${l.to}.${l.toPort}`; })]);
+  for (const line of held.log) {
+    if (line.startsWith('✗')) problems.push(`${where}: ${line.replace(/^✗ #(\d+) (\w+): /, 'op $1 $2: ')}`);
+    else if (line.includes('; problems: ')) problems.push(`${where}: ${line.split('; problems: ')[1]}`);   // an add that half worked
+  }
+  // only jacks of the patch itself: what each move adds is its own, whatever id the trial gave it
+  const jacks = new Set([...held.lost, ...held.made.map((id) => trial.links.get(id))]
+    .filter((l) => base.nodes.has(l.to))
+    .map((l) => `${l.to}.${l.toPort}`));
   return { move, jacks };
 }
 

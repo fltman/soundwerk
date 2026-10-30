@@ -5,6 +5,8 @@ import { getDef, inputPorts, outputPorts, cvParams, paramRange } from '../module
 import { RAIL } from '../modules/lib/index.js';
 import { compileCode } from './code.js';
 
+const STALE = 32;      // 16ths: nothing is ever held for more than a bar ahead
+
 // Telemetry is one Float32Array, shared with the wall when there is a wall.
 export const TEL = {
   GLOBAL: 64,      // [0] cpu, [1] [2] master peaks, [3] clipping, [4] running
@@ -39,6 +41,10 @@ class Instance {
     this.wave = waveSlot >= 0
       ? rack.telemetry.subarray(TEL.GLOBAL + TEL.UI * TEL.SLOTS + TEL.WAVE * waveSlot, TEL.GLOBAL + TEL.UI * TEL.SLOTS + TEL.WAVE * (waveSlot + 1))
       : def.wave ? new Float32Array(TEL.WAVE) : null;   // out of shared screens: blank, but the wall plays on
+    this.normal = this.ports.map((p) => {   // R falls back to L while it has no cable
+      const left = p.name === 'r' ? 'l' : p.name.endsWith('R') ? `${p.name.slice(0, -1)}L` : null;
+      return left ? this.ports.findIndex((q) => q.name === left) : -1;
+    });
     this.waveSlot = waveSlot;
     this.dsp = null;
     this.data = null;
@@ -95,7 +101,7 @@ export class Rack {
       case 'code': return this.setCode(m.id, m.code);
       case 'run': this.running = !!m.on; return undefined;
       case 'at': this.queued.push(m); return undefined;
-      case 'drop': this.queued = []; return undefined;
+      case 'flush': this.land(Infinity); return undefined;
       default: return undefined;
     }
   }
@@ -249,7 +255,9 @@ export class Rack {
       let target = now ? now.src.o[now.from] : 0;
       if (!(target === target)) target = 0;
       target = Math.max(-RAIL, Math.min(RAIL, target));
-      const gap = m.i[k] - target;
+      // plugging an R that was following L: what it was putting out is L
+      const have = !was && now && m.normal[k] >= 0 ? m.i[m.normal[k]] : m.i[k];
+      const gap = have - target;
       m.fades = m.fades?.filter((f) => f.to !== k) ?? null;
       if (!(Math.abs(gap) > 1e-4)) { m.i[k] = target; continue; }
       (m.fades ??= []).push({ to: k, gap, left: this.fadeLength });
@@ -275,7 +283,8 @@ export class Rack {
   land(n) {
     while (this.queued.length) {
       const q = this.queued[0], c = this.modules.get(q.clock);
-      if (c && this.running && c.dsp.samplesTo(q.step) > n + 1) return;   // + 1: rounding must not lose the race
+      // + 1: rounding must not lose the race. Far ahead means the Clock started over since.
+      if (c && this.running && q.step - c.dsp.position() <= STALE && c.dsp.samplesTo(q.step) > n + 1) return;
       this.queued.shift();
       for (const m of q.msgs) this.apply(m);
     }

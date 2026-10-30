@@ -67,7 +67,13 @@ export class DJ extends EventTarget {
     this.message = '';
     this.resetStats();
     graph.addEventListener('change', (e) => {
-      if (this.running && (e.detail.kind === 'load' || (e.detail.kind === 'rig' && !this.rig))) this.stop('The patch changed, so the DJ stopped', false);
+      const { kind, id, name } = e.detail;
+      if (this.running && (kind === 'load' || (kind === 'rig' && !this.rig))) {
+        this.glides.clear();   // they were heading for a patch that is gone
+        this.stop('The patch changed, so the DJ stopped', false);
+      }
+      // your hand on a knob beats the DJ's
+      if ((kind === 'param' || kind === 'depth') && !this.writing) this.glides.delete(`${id}.${kind === 'param' ? 'params' : 'depth'}.${name}`);
     });
   }
 
@@ -108,12 +114,14 @@ export class DJ extends EventTarget {
     this.graph.setRig(rig);
     for (const g of rig.groups) this.fire(g, g.moves[0], { by: 'start', bars: 0 });
     await this.audition();
+    if (this.graph.rig !== rig) return { saved: false, lines: ['✗ the patch changed while the moves were being tested, so nothing was saved'] };
     this.graph.commit();
     const lines = [];
     for (const g of rig.groups) {
       for (const m of g.moves) {
         const t = m.test;
-        lines.push(t.ok ? `✓ ${g.name}/${m.name}: ${t.lufs} LUFS${t.measured ? `, ${t.measured}` : ''}` : `✗ ${g.name}/${m.name}: ${t.why}`);
+        if (!t) lines.push(`✗ ${g.name}/${m.name}: could not be tested${this.message ? ` (${this.message})` : ''}`);
+        else lines.push(t.ok ? `✓ ${g.name}/${m.name}: ${t.lufs} LUFS${t.measured ? `, ${t.measured}` : ''}` : `✗ ${g.name}/${m.name}: ${t.why}`);
       }
     }
     return { saved: true, lines: [...lines, ...notes.map((n) => `⚠ ${n}`)] };
@@ -376,6 +384,12 @@ export class DJ extends EventTarget {
     const from = step ?? this.position() ?? 0;
     const length = (bars ?? 0) * 16;
     const gliding = (op) => length > 0 && op.op === 'set' && graph.nodes.has(op.id);
+    // whatever was heading for these knobs doesn't get to finish
+    for (const op of move.ops) {
+      if (op.op !== 'set') continue;
+      for (const name of Object.keys(op.params ?? {})) this.glides.delete(`${op.id}.params.${name}`);
+      for (const name of Object.keys(op.depth ?? {})) this.glides.delete(`${op.id}.depth.${name}`);
+    }
     const { log, ...held } = enterMove(graph, move, gliding);
     rig.held[group.name] = held;
     for (const op of move.ops) {
@@ -401,8 +415,10 @@ export class DJ extends EventTarget {
   }
 
   write(id, field, name, value) {
+    this.writing = true;
     if (field === 'depth') this.graph.setDepth(id, name, value);
     else this.graph.setParam(id, name, value);
+    this.writing = false;
   }
 
   stepGlides(pos) {

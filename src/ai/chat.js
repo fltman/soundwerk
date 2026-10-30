@@ -138,7 +138,8 @@ export class Chat {
       return `${r.log.join('\n')}\n\nPatch now:\n${describePatch(g, { selected: [...this.wall.selected] })}`;
     }
     if (call.function.name === 'set_rig') {
-      const r = await this.dj.install(args);
+      // a tool call must always get an answer, or the whole conversation is refused from then on
+      const r = await this.dj.install(args).catch((e) => ({ saved: false, lines: [`✗ ${e.message}`] }));
       if (gone()) return '';
       this.add({ kind: 'ops', lines: r.lines });
       if (!r.saved) return `The rig was not saved. Fix these and send it again:\n${r.lines.join('\n')}`;

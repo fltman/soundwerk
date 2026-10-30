@@ -25,8 +25,11 @@ export class Host extends EventTarget {
     graph.addEventListener('rebuild', () => this.forget());
     graph.addEventListener('change', (e) => {
       const { kind, id, name, value, data } = e.detail;
-      if (kind === 'structure' || kind === 'load') this.sync();
-      else if (kind === 'param') {
+      if (kind === 'structure' || kind === 'load') {
+        // anything held for a downbeat goes in first, or it would land on top of this
+        if (!this.held) this.post({ t: 'flush' });
+        this.sync();
+      } else if (kind === 'param') {
         const l = this.live.get(id);
         if (l) l.params[name] = value;
         this.post({ t: 'param', id, k: name, v: value });
@@ -94,7 +97,7 @@ export class Host extends EventTarget {
   // A whole new patch starts clean: fresh clocks fire their reset, so every sequencer on the new
   // wall lines up. Undo goes through sync() instead, and keeps everything that stays.
   forget() {
-    this.post({ t: 'drop' });
+    this.post({ t: 'flush' });
     for (const [id, l] of this.live) {
       this.post({ t: 'remove', id });
       this.freeSlots.push(l.slot);

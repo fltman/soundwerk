@@ -101,6 +101,14 @@ export class Graph extends EventTarget {
     this.changed('depth', { id, name, value });
   }
 
+  // back to the default, as if nobody had touched it
+  clearDepth(id, name) {
+    const node = this.nodes.get(id);
+    if (!node || !(name in node.depth)) return;
+    delete node.depth[name];
+    this.changed('depth', { id, name, value: 0.5 });
+  }
+
   setData(id, data) {
     const node = this.nodes.get(id);
     if (!node) return;
@@ -136,6 +144,7 @@ export class Graph extends EventTarget {
       version: 1,
       nodes: [...this.nodes.values()].map((n) => structuredClone(n)),
       links: [...this.links.values()].map((l) => ({ ...l })),
+      nextId: this.nextId,   // ids are never reused: a rig remembers the ones it added
       ...(this.rig ? { rig: structuredClone(this.rig) } : {}),
     };
   }
@@ -161,7 +170,7 @@ export class Graph extends EventTarget {
       if (!this.outPort(l.from, l.fromPort) || !this.inPort(l.to, l.toPort)) continue;
       this.links.set(l.id, { id: l.id, from: l.from, fromPort: l.fromPort, to: l.to, toPort: l.toPort });
     }
-    this.nextId = max + 1;
+    this.nextId = Math.max(max + 1, json.nextId ?? 0);
     this.rig = json.rig ? structuredClone(json.rig) : null;
     this.changed('load');
   }

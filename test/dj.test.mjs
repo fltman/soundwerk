@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Graph } from '../src/rack/graph.js';
 import { Rack } from '../src/engine/rack.js';
+import { Host } from '../src/engine/host.js';
 import { atHome, checkRig, enterMove, fingerprint, leaveMove } from '../src/dj/rig.js';
 import { isDue, pickMove, questionsFor, sectionAt } from '../src/dj/choose.js';
 import { auditionRig } from '../src/dj/audition.js';
@@ -235,14 +236,26 @@ test('a held change for a Clock that is gone goes straight in', () => {
   assert.equal(rack.queued.length, 0);
 });
 
-test('drop forgets what was held', () => {
+test('flush puts in what was held, now', () => {
   const rack = clocked();
   rack.running = true;
   blocks(rack, 1);
-  rack.apply({ t: 'at', clock: 'c', step: 1600, msgs: [{ t: 'remove', id: 'o' }] });
-  rack.apply({ t: 'drop' });
-  blocks(rack, 1);
+  rack.apply({ t: 'at', clock: 'c', step: 16, msgs: [{ t: 'remove', id: 'o' }] });
   assert.ok(rack.modules.has('o'));
+  rack.apply({ t: 'flush' });
+  assert.ok(!rack.modules.has('o'));
+  assert.equal(rack.queued.length, 0);
+});
+
+test('a change held for a step the Clock has since left behind goes straight in', () => {
+  const rack = clocked();
+  rack.running = true;
+  blocks(rack, 1);
+  rack.apply({ t: 'at', clock: 'c', step: 336, msgs: [{ t: 'param', id: 'o', k: 'o1', v: 2 }] });
+  rack.apply({ t: 'at', clock: 'c', step: 16, msgs: [{ t: 'param', id: 'o', k: 'o2', v: 3 }] });
+  blocks(rack, 1);
+  assert.equal(rack.queued.length, 1, 'and it must not hold up what comes after it');
+  assert.equal(rack.queued[0].step, 16);
 });
 
 // Plays bar 1 with a silent pattern and sends the kick pattern `after` samples past the top of the
@@ -646,6 +659,221 @@ test('the model sees the arc, what is on, and for how long', async () => {
   assert.ok('fx' in last.state.playing_now);
   assert.ok('fx' in last.state.bars_held);
   dj.stop();
+});
+
+// ── what the independent review found ───────────────────
+// The real Host talking to the real Rack, with the wall left out.
+function wired() {
+  const g = new Graph();
+  const host = new Host(g);
+  const rack = new Rack({ sampleRate: 48000, telemetry: host.telemetry });
+  host.node = { port: { postMessage: (m) => rack.apply(m) } };
+  const clock = g.addNode('clock').id, vco = g.addNode('vco').id, mix = g.addNode('mixer').id, out = g.addNode('master').id;
+  g.connect(vco, 'saw', mix, 'in1');
+  g.connect(mix, 'out', out, 'l');
+  rack.running = true;
+  host.running = true;
+  blocks(rack, 2);
+  return { g, rack, host, clock, vco, mix, out };
+}
+const inEngine = (rack) => rack.links.map((l) => `${l.from}.${l.fromPort}>${l.to}.${l.toPort}`).sort();
+const inGraph = (g) => [...g.links.values()].map((l) => `${l.from}.${l.fromPort}>${l.to}.${l.toPort}`).sort();
+const insert = (s) => ({ name: 'on', ops: [
+  { op: 'add', type: 'crush', ref: 'c' },
+  { op: 'connect', from: s.mix, from_port: 'out', to: 'c', to_port: 'in' },
+  { op: 'connect', from: 'c', from_port: 'out', to: s.out, to_port: 'l' },
+] });
+
+test('undo while a move is held doesn\'t let it land afterwards', () => {
+  const s = wired();
+  s.g.commit();
+  s.host.at(s.clock, 16, () => enterMove(s.g, insert(s)));
+  s.g.commit();
+  s.g.undo();
+  blocks(s.rack, 2);
+  assert.deepEqual(inEngine(s.rack), inGraph(s.g));
+  assert.equal(s.rack.queued.length, 0);
+  assert.deepEqual([...s.rack.modules.keys()].sort(), [...s.g.nodes.keys()].sort(), 'no ghost modules');
+});
+
+test('a cable you plug while a move is held stays plugged when it lands', () => {
+  const s = wired();
+  const extra = s.g.addNode('vco').id;
+  s.host.at(s.clock, 16, () => enterMove(s.g, insert(s)));
+  s.g.connect(extra, 'saw', s.mix, 'in2');
+  blocks(s.rack, 800);   // well past the downbeat it was held for
+  assert.deepEqual(inEngine(s.rack), inGraph(s.g));
+  assert.ok(inEngine(s.rack).some((l) => l.endsWith('in2')));
+});
+
+test('two groups may each put an effect in their own place', () => {
+  const s = small();
+  const other = s.g.addNode('vco').id, m2 = s.g.addNode('mixer').id;
+  s.g.connect(other, 'saw', m2, 'in1');
+  s.g.connect(m2, 'out', s.out, 'r');
+  const raw = rigFor(s);
+  raw.groups[0] = { name: 'right', question: 'q', moves: [
+    { name: 'clean', description: 'd', ops: [] },
+    { name: 'crushed', description: 'd', ops: [
+      { op: 'add', type: 'phaser', ref: 'p' },
+      { op: 'connect', from: m2, from_port: 'out', to: 'p', to_port: 'inL' },
+      { op: 'connect', from: 'p', from_port: 'outL', to: s.out, to_port: 'r' },
+    ] },
+  ] };
+  raw.groups[1].moves[1].ops = [
+    { op: 'add', type: 'phaser', ref: 'p' },
+    { op: 'connect', from: s.vca, from_port: 'out', to: 'p', to_port: 'inL' },
+    { op: 'connect', from: 'p', from_port: 'outL', to: s.out, to_port: 'l' },
+  ];
+  assert.deepEqual(checkRig(s.g, raw).problems, []);
+});
+
+test('undo in the middle of a glide leaves the restored patch exactly as it was', async () => {
+  const { dj, host, g } = await aSet();
+  const mixer = nodeOf(g, 'mixer');
+  g.commit();
+  const saved = JSON.stringify(g.toJSON());
+  await play(dj, host, 40);
+  assert.ok(dj.glides.size > 0);
+  g.load(JSON.parse(saved));
+  assert.equal(dj.running, false);
+  assert.equal(g.nodes.get(mixer.id).params.l1, 0.5);
+  assert.equal(dj.glides.size, 0);
+});
+
+test('a rig the patch moved away from during its test answers, and doesn\'t throw', async () => {
+  const s = small();
+  const dj = new DJ({ graph: s.g, host: new FakeHost(s.g), decide: async () => ({}), audit: async () => { s.g.load(EMPTY.patch()); return { print: 0, moves: {} }; } });
+  const r = await dj.install(rigFor(s));
+  assert.equal(r.saved, false);
+  assert.match(r.lines[0], /patch changed/);
+});
+
+test('a failed test is reported move by move', async () => {
+  const s = small();
+  const dj = new DJ({ graph: s.g, host: new FakeHost(s.g), decide: async () => ({}), audit: async () => { throw new Error('worker died'); } });
+  const r = await dj.install(rigFor(s));
+  assert.equal(r.saved, true);
+  assert.ok(r.lines.every((l) => l.startsWith('✗')));
+  assert.match(r.lines[0], /worker died/);
+});
+
+test('a move that cuts wins over a glide still heading for the same knob', async () => {
+  const { dj, g, rig, vca } = await aSet({ decide: async () => ({ answers: {} }) });
+  const low = rig.groups[0].moves[1], home = rig.groups[0].moves[0];
+  dj.fire(rig.groups[0], low, { bars: 4, step: 0 });
+  assert.equal(dj.glides.size, 1);
+  dj.fire(rig.groups[0], { ...home, ops: [{ op: 'set', id: vca, params: { l1: 0.9 }, depth: {} }] }, { bars: 0 });
+  assert.equal(dj.glides.size, 0);
+  assert.equal(g.nodes.get(vca).params.l1, 0.9);
+  dj.stop();
+});
+
+test('a jack that had no depth has none again when its cable comes back', () => {
+  const s = small();
+  const lfo = s.g.addNode('lfo').id, filter = s.g.addNode('svf').id;
+  s.g.connect(lfo, 'bi', filter, 'cutoff');
+  const before = JSON.stringify(s.g.nodes.get(filter).depth);
+  const held = enterMove(s.g, { name: 'x', ops: [
+    { op: 'add', type: 'lfo', ref: 'l' },
+    { op: 'connect', from: 'l', from_port: 'bi', to: filter, to_port: 'cutoff', mod_depth: 0.8 },
+  ] });
+  leaveMove(s.g, held);
+  assert.equal(JSON.stringify(s.g.nodes.get(filter).depth), before);
+});
+
+test('a patch saved before moves remembered depths still leaves them cleanly', async () => {
+  const s = small();
+  const lfo = s.g.addNode('lfo').id, filter = s.g.addNode('svf').id;
+  s.g.connect(lfo, 'bi', filter, 'cutoff');
+  s.g.setDepth(filter, 'cutoff', 0.12);
+  const { rig } = checkRig(s.g, rigFor(s));
+  s.g.setRig(rig);
+  // as it was saved: the depth on each lost cable, no list of its own
+  const { depth, lost, ...held } = enterMove(s.g, { name: 'crushed', ops: [
+    { op: 'add', type: 'lfo', ref: 'l' },
+    { op: 'connect', from: 'l', from_port: 'bi', to: filter, to_port: 'cutoff', mod_depth: 0.8 },
+  ] });
+  rig.held = { fx: { ...held, lost: lost.map((l) => ({ ...l, depth: 0.12 })) } };
+  const saved = JSON.parse(JSON.stringify(s.g.toJSON()));
+  const g2 = new Graph();
+  g2.load(saved);
+  const dj = new DJ({ graph: g2, host: new FakeHost(g2), decide: async () => ({}), audit: async () => ({ print: 0, moves: {} }) });
+  const r = await dj.install(rigFor(s));
+  assert.equal(r.saved, true);
+  assert.equal(g2.linkInto(filter, 'cutoff').from, lfo);
+  assert.equal(g2.nodes.get(filter).depth.cutoff, 0.12);
+  assert.equal(g2.nodes.size, s.g.nodes.size - 1);
+});
+
+test('a jack that was empty loses the depth the move gave it, too', () => {
+  const s = small();
+  const filter = s.g.addNode('svf').id;
+  const held = enterMove(s.g, { name: 'x', ops: [
+    { op: 'add', type: 'lfo', ref: 'l' },
+    { op: 'connect', from: 'l', from_port: 'bi', to: filter, to_port: 'cutoff', mod_depth: 0.8 },
+  ] });
+  leaveMove(s.g, held);
+  assert.deepEqual(s.g.nodes.get(filter).depth, {});
+});
+
+test('your hand on a knob stops the DJ\'s glide on it, and only that one', async () => {
+  const { dj, host, g, vca } = await aSet();
+  await play(dj, host, 40);
+  assert.equal(dj.glides.size, 1);
+  g.setParam(vca, 'l2', 1);
+  assert.equal(dj.glides.size, 1);
+  g.setParam(vca, 'l1', 1);
+  assert.equal(dj.glides.size, 0);
+  await play(dj, host, 60);
+  assert.equal(g.nodes.get(vca).params.l1, 1);
+  dj.stop();
+});
+
+test('an id is never reused, even across a reload, so a rig can\'t take your module for its own', () => {
+  const { g, rig } = installed();
+  const held = enterMove(g, rig.groups[1].moves[1]);
+  rig.held = { fx: held };
+  const theirs = held.nodes[0];
+  g.removeNode(theirs);
+  const g2 = new Graph();
+  g2.load(JSON.parse(JSON.stringify(g.toJSON())));
+  const yours = [g2.addNode('vco').id, g2.addNode('vco').id];
+  assert.ok(!yours.includes(theirs));
+  leaveMove(g2, g2.rig.held.fx);
+  assert.ok(yours.every((id) => g2.nodes.has(id)));
+});
+
+test('a depth outside the range is clamped before a glide can play it', () => {
+  const s = small();
+  const filter = s.g.addNode('svf').id;
+  const raw = rigFor(s);
+  raw.groups[0].moves[1].ops = [{ op: 'set', id: filter, params: {}, depth: { cutoff: 5 } }];
+  raw.groups[0].moves[0].ops = [{ op: 'set', id: filter, params: {}, depth: { cutoff: 0.5 } }];
+  assert.equal(checkRig(s.g, raw).rig.groups[0].moves[1].ops[0].depth.cutoff, 1);
+});
+
+test('a typo in an added module\'s params is a problem, not a silent default', () => {
+  const s = small();
+  const raw = rigFor(s);
+  raw.groups[1].moves[1].ops[0].params = { bitz: 4 };
+  assert.match(checkRig(s.g, raw).problems.join(), /no param "bitz"/);
+});
+
+test('plugging R carries on from what L was putting there, without a click', () => {
+  const rack = new Rack({ sampleRate: 48000 });
+  rack.apply({ t: 'add', id: 'a', type: 'vco', params: { tune: 0 } });
+  rack.apply({ t: 'add', id: 'm', type: 'master', params: { volume: 0.5 } });
+  rack.apply({ t: 'links', links: [{ from: 'a', fromPort: 'sine', to: 'm', toPort: 'l' }] });
+  const a = new Float32Array(128), b = new Float32Array(128), right = [];
+  for (let i = 0; i < 300; i++) {
+    rack.process(a, b, 128);
+    right.push(...b);
+    if (i === 250) rack.apply({ t: 'links', links: [{ from: 'a', fromPort: 'sine', to: 'm', toPort: 'l' }, { from: 'a', fromPort: 'sine', to: 'm', toPort: 'r' }] });
+  }
+  let worst = 0;
+  for (let i = 1; i < right.length; i++) worst = Math.max(worst, Math.abs(right[i] - right[i - 1]));
+  assert.ok(worst < 0.02, `jumped ${worst}`);
 });
 
 // ── the audition ────────────────────────────────────────
