@@ -11,9 +11,11 @@ import { Chat } from './ai/chat.js';
 import { Devices } from './ui/devices.js';
 import { DJ } from './dj/dj.js';
 import { DJPanel } from './ui/dj.js';
+import { PatchwerkLink } from './link/patchwerk.js';
 
 const $ = (id) => document.getElementById(id);
 const PATCH_KEY = 'soundwerk.patch.v1';
+const LINK_KEY = 'soundwerk.link.v1';
 
 const graph = new Graph();
 const host = new Host(graph);
@@ -39,6 +41,21 @@ dj.addEventListener('landed', (e) => wall.flash(e.detail.ids));
 $('ai-btn').onclick = () => chat.toggle();
 window.soundwerk.chat = chat;
 window.soundwerk.dj = dj;
+const link = new PatchwerkLink({ graph, host, dj });
+const linkBtn = $('link-btn');
+linkBtn.onclick = () => {
+  link.toggle();
+  localStorage.setItem(LINK_KEY, link.wanted ? '1' : '');
+};
+link.addEventListener('state', () => {
+  linkBtn.classList.toggle('on', link.wanted);
+  linkBtn.classList.toggle('live', link.connected);
+  linkBtn.title = link.connected ? 'Patchwerk is following this wall. Click to stop'
+    : link.wanted ? 'Waiting for Patchwerk: start it with npm start on port 8270. Click to stop'
+      : 'Send this wall to Patchwerk on this machine, so its pictures follow the music';
+});
+window.soundwerk.link = link;
+if (localStorage.getItem(LINK_KEY)) link.toggle(true);
 host.addEventListener('module-error', (e) => {
   const { id, text } = e.detail;
   toast(id ? `${id} stopped: ${text}` : `Engine error: ${text}`);

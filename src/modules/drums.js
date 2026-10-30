@@ -1,6 +1,6 @@
 // Analog drum voices. Each takes a trigger and an accent, and rests at no cost once its tail is gone.
 import {
-  Module, Trigger, Rng, OnePole, TAU, DENORMAL, clamp, expmap, tanh, fmtHz, fmtExp, fmtExpHz, fmtPct, fmtSt, fmtRatio,
+  Module, Trigger, Rng, OnePole, TAU, DENORMAL, HITS, clamp, expmap, tanh, fmtHz, fmtExp, fmtExpHz, fmtPct, fmtSt, fmtRatio,
   DrumSVF, DrumDeclick, DrumMetal, drumK, drumAccent,
 } from './lib/index.js';
 
@@ -54,7 +54,7 @@ export const kick = {
     tick(i, o, p) {
       const accent = i[1], pitch = i[2];
       const tune = p[0], decay = p[1], attack = p[2], sweep = p[3], drive = p[4], mode = p[5];
-      if (this.trig.tick(i[0])) this.hit(accent, attack, sweep, mode);
+      if (this.trig.tick(i[0])) { this.ui[HITS]++; this.hit(accent, attack, sweep, mode); }
       if (!this.on) { o[0] = 0; return; }
       if (pitch !== this.pv || tune !== this.tv) {
         this.pv = pitch; this.tv = tune;
@@ -116,6 +116,7 @@ export const snare = {
     tick(i, o, p) {
       const tune = p[0], tone = p[1], snappy = p[2], decay = p[3];
       if (this.trig.tick(i[0])) {
+        this.ui[HITS]++;
         this.ph1 = 0; this.ph2 = 0; this.sw = 1;
         this.e1 = 1; this.e2 = 1; this.en = 1;
         this.gain = drumAccent(i[1]);
@@ -205,11 +206,13 @@ export const hats = {
       if (tune !== this.tv) { this.tv = tune; this.metal.retune(2 ** (tune / 12)); }
       if (tone !== this.cv) this.setBand(tone);
       if (this.closed.tick(i[0])) {
+        this.ui[HITS]++;
         this.wake();
         this.envC = drumAccent(i[2]);
         this.choked = true;
       }
       if (this.open.tick(i[1])) { // after the closed: both on one sample is an open hit
+        this.ui[HITS]++;
         this.wake();
         this.envO = drumAccent(i[2]);
         this.choked = false;
@@ -255,6 +258,7 @@ export const clap = {
     tick(i, o, p) {
       const tone = p[0], decay = p[1], spread = p[2];
       if (this.trig.tick(i[0])) {
+        this.ui[HITS]++;
         this.left = 4; // the fourth burst opens the tail
         this.wait = 0;
         this.gain = drumAccent(i[1]);
@@ -477,6 +481,7 @@ export const ride = {
       const decay = p[0], tone = p[1], mode = p[2];
       if (tone !== this.tv) { this.tv = tone; this.hi.set(expmap(tone, 5000, 11000), 0.8); }
       if (this.trig.tick(i[0])) {
+        this.ui[HITS]++;
         if (!this.on) { // as in the hats: the filters are up to speed before the VCA opens
           this.metal.rewind(64);
           for (let n = 0; n < 64; n++) this.ring();

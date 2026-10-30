@@ -1,6 +1,7 @@
 // The small toolbox every module's DSP class is written with. These names are in scope
 // inside a Code module too, which is what makes forking a module's source work.
 export const TAU = Math.PI * 2;
+export const HITS = 63;   // ui slot where a drum voice counts its hits, for whoever is watching
 export const C4 = 261.6255653005986;
 export const RAIL = 12;
 export const DENORMAL = 1e-20;

@@ -53,6 +53,9 @@ canvas or two. Chrome, Edge or Arc. The server only exists to set the two header
   level or changes nothing is struck out and never played. If the wall goes silent or the
   limiter works too hard, code sends everything back home. Click a pad to play a move yourself.
   About a cent an hour on `inception/mercury-decide`; override it with `SOUNDWERK_DJ_MODEL`.
+- **⇢ Patchwerk:** send the wall to [Patchwerk](https://github.com/fltman/patchwerk) on the same
+  machine and its pictures follow the music: its Clock, its drum hits, its sound and the shape
+  of a DJ set, about 15 ms behind the engine. Press **◉ Soundwerk** there. The button stays on.
 - **DSP tab:** read the source of any module, *Fork* it into a live-editable Code module,
   or write your own: `// param cut -3 3 0 "CUT" cv` in a comment becomes a knob with a jack,
   and `function tick(i, o, p)` runs once per sample. If it throws, that module stops and the

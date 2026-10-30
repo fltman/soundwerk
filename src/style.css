@@ -261,3 +261,8 @@ main { flex: 1; position: relative; min-height: 0; }
 .dj-empty { color: var(--muted); padding: 6px 0; }
 .mod.dj-lit { animation: dj-lit 0.7s ease-out; }
 @keyframes dj-lit { from { outline: 2px solid var(--amber); outline-offset: 3px; } to { outline: 2px solid transparent; outline-offset: 12px; } }
+
+/* ── the link to Patchwerk ───────────────────────────── */
+.btn.link { color: var(--muted); }
+.btn.link.on { color: var(--text); border-color: var(--line-2); }
+.btn.link.live { color: #15130c; background: #7fd1a0; border-color: #7fd1a0; font-weight: 700; }
