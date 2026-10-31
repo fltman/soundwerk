@@ -51,7 +51,9 @@ canvas or two. Chrome, Edge or Arc. The server only exists to set the two header
   appear on the wall and leave again. Every few bars the model picks from them, and each move
   lands exactly on a downbeat. Every move is rendered first, and one that goes silent, jumps in
   level or changes nothing is struck out and never played. If the wall goes silent or the
-  limiter works too hard, code sends everything back home. Click a pad to play a move yourself.
+  limiter works too hard, code sends everything back home. Click a pad to play a move yourself,
+  and turn the **Daring** knob, also during a set: low plays it safe, high goes for the surprising
+  move and changes more often. It never plays a move that failed its test.
   About a cent an hour on `inception/mercury-decide`; override it with `SOUNDWERK_DJ_MODEL`.
 - **⇢ Patchwerk:** send the wall to [Patchwerk](https://github.com/fltman/patchwerk) on the same
   machine and its pictures follow the music: its Clock, its drum hits, its sound and the shape

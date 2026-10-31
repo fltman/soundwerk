@@ -3,6 +3,9 @@
 // pad failed its test. Click a pad to play it yourself.
 import { sectionAt } from '../dj/choose.js';
 
+const DARING_KEY = 'soundwerk.daring.v1';
+const DRAG = 160;   // pixels for the whole sweep
+
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
@@ -24,9 +27,48 @@ export class DJPanel {
     document.getElementById('dj-close').onclick = () => this.toggle(false);
     document.getElementById('dj-build').onclick = () => this.build();
     this.startBtn.onclick = () => (dj.running ? dj.stop() : dj.start());
+    this.knob();
     dj.addEventListener('update', () => this.refresh());
     graph.addEventListener('change', (e) => { if (e.detail.kind === 'rig' || e.detail.kind === 'load') this.render(); });
     this.render();
+  }
+
+  // Like the knobs on the wall: drag up or right, double-click for the middle, arrows when focused.
+  // A setting of the performance, not the patch, so it stays when the patch changes and undo leaves it.
+  knob() {
+    const { dj } = this;
+    const knob = document.getElementById('dj-daring'), value = document.getElementById('dj-daring-value');
+    const show = () => {
+      const pct = Math.round(dj.daring * 100);
+      knob.style.setProperty('--v', dj.daring);
+      knob.setAttribute('aria-valuenow', pct);
+      value.textContent = dj.daring <= 0.25 ? 'safe' : dj.daring >= 0.75 ? 'daring' : `${pct} %`;
+    };
+    const set = (v) => {
+      dj.daring = Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+      localStorage.setItem(DARING_KEY, dj.daring);
+      show();
+    };
+    const saved = parseFloat(localStorage.getItem(DARING_KEY));
+    if (Number.isFinite(saved)) dj.daring = saved;
+    show();
+    let drag = null;
+    knob.addEventListener('pointerdown', (e) => {
+      knob.setPointerCapture(e.pointerId);
+      drag = { x: e.clientX, y: e.clientY, v: dj.daring };
+    });
+    knob.addEventListener('pointermove', (e) => {
+      if (drag) set(drag.v + ((e.clientX - drag.x) + (drag.y - e.clientY)) / (e.shiftKey ? DRAG * 4 : DRAG));
+    });
+    knob.addEventListener('pointerup', () => { drag = null; });
+    knob.addEventListener('dblclick', () => set(0.5));
+    knob.addEventListener('keydown', (e) => {
+      const step = { ArrowUp: 0.05, ArrowRight: 0.05, ArrowDown: -0.05, ArrowLeft: -0.05 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      e.stopPropagation();   // on the wall the arrows pan
+      set(dj.daring + step);
+    });
   }
 
   toggle(open = this.panel.classList.contains('hidden')) {

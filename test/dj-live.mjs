@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 
 const REAL = process.argv.includes('--real');
 const SECONDS = Number(process.argv.find((a) => /^\d+$/.test(a))) || 60;
+const DARING = process.argv.find((a) => a.startsWith('--daring='))?.slice(9);
 if (REAL && !process.env.OPENROUTER_API_KEY) { console.log('OPENROUTER_API_KEY is not set'); process.exit(2); }
 const PORT = 20000 + Math.floor(Math.random() * 20000);
 const server = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -72,6 +73,29 @@ await page.waitForTimeout(500);
 check('the panel shows the rig', (await page.locator('.dj-row').count()) === 5, `${await page.locator('.dj-pad').count()} pads`);
 await page.screenshot({ path: 'test/out/dj-panel.png' });
 
+// the Daring knob, with a real mouse and the keyboard
+const knob = await page.locator('#dj-daring').boundingBox();
+const daring = () => page.evaluate(() => window.soundwerk.dj.daring);
+const at = { x: knob.x + knob.width / 2, y: knob.y + knob.height / 2 };
+check('the knob rests in the middle', (await daring()) === 0.5);
+await page.mouse.move(at.x, at.y);
+await page.mouse.down();
+await page.mouse.move(at.x, at.y - 40, { steps: 4 });
+await page.mouse.up();
+check('dragging up turns it up', (await daring()) === 0.75, `${await daring()}, reads "${await page.locator('#dj-daring-value').textContent()}"`);
+await page.focus('#dj-daring');
+const panBefore = await page.evaluate(() => window.soundwerk.wall.view.x);
+await page.keyboard.press('ArrowDown');
+check('an arrow key moves it, and not the wall', (await daring()) === 0.7 && (await page.evaluate(() => window.soundwerk.wall.view.x)) === panBefore);
+await page.reload();
+await page.waitForFunction(() => window.soundwerk?.graph.nodes.size > 0);
+check('it remembers where it was', (await daring()) === 0.7);
+await page.click('#dj-btn');
+await page.waitForTimeout(400);
+await page.dblclick('#dj-daring');
+check('a double-click puts it back in the middle', (await daring()) === 0.5);
+if (DARING) await page.evaluate((v) => { window.soundwerk.dj.daring = v; }, Number(DARING));
+
 // from here on: how long landings take on the main thread, and what got added
 await page.evaluate(() => {
   const { dj, graph } = window.soundwerk;
@@ -110,7 +134,9 @@ const r = await page.evaluate(() => {
 console.log(`     ${r.played + 1} bars, ${r.log.length} moves in the log, ${JSON.stringify(r.stats)}`);
 console.log(`     ${r.log.slice(-14).join(' · ')}`);
 console.log(`     landings: ${r.land.n}, worst ${r.land.worst.toFixed(1)} ms on the main thread; DSP ${(r.cpu * 100).toFixed(0)} %`);
-check('moves landed', r.log.filter((l) => !l.includes('(start)')).length > 3);
+const landed = r.log.filter((l) => !l.includes('(start)'));
+console.log(`     daring ${DARING ?? 0.5}: ${landed.length} moves in ${r.played + 1} bars, ${r.stats.calls} decisions, ${new Set(landed.map((l) => l.split(' ')[1])).size} different moves`);
+if (!DARING) check('moves landed', landed.length > 3);
 check('nothing failed', r.stats.fails === 0);
 check('nothing dropped out', r.drops === 0, `${r.drops} underruns`);
 check('the ear hears the wall', r.levels > 0);

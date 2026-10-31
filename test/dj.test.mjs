@@ -6,7 +6,7 @@ import { Graph } from '../src/rack/graph.js';
 import { Rack } from '../src/engine/rack.js';
 import { Host } from '../src/engine/host.js';
 import { atHome, checkRig, enterMove, fingerprint, leaveMove } from '../src/dj/rig.js';
-import { isDue, pickMove, questionsFor, sectionAt } from '../src/dj/choose.js';
+import { isDue, pickMove, questionsFor, sectionAt, style } from '../src/dj/choose.js';
 import { auditionRig } from '../src/dj/audition.js';
 import { DJ } from '../src/dj/dj.js';
 import { PRESETS, EMPTY } from '../src/presets.js';
@@ -409,6 +409,104 @@ test('an ordered group stays put near where it is', () => {
   assert.equal(pickMove(group, { score: 1.3, probabilities: [0, 1, 0] }, { current: 'b' }).move, null);
   assert.equal(pickMove(group, { score: 2, probabilities: [0, 0, 1] }, { current: 'b' }).move.name, 'c');
   assert.equal(pickMove(group, { score: 2.4, probabilities: [0, 0, 1] }, { current: 'a' }).move.name, 'c');
+});
+
+// ── the daring knob ─────────────────────────────────────
+const MODEL = { probabilities: { a: 0.7, b: 0.2, c: 0.08, d: 0.02 } };
+const FOUR = { every: 8, moves: ['a', 'b', 'c', 'd'].map((name) => ({ name })) };
+
+// how often each move wins, from an even spread of rolls
+function shares(daring, more = {}) {
+  const wins = { a: 0, b: 0, c: 0, d: 0 }, N = 4000;
+  for (let i = 0; i < N; i++) {
+    const { move } = pickMove(FOUR, MODEL, { current: 'x', random: () => (i + 0.5) / N, daring, ...more });
+    wins[move.name]++;
+  }
+  return Object.fromEntries(Object.entries(wins).map(([k, v]) => [k, v / N]));
+}
+
+test('in the middle the knob is the DJ as it always was', () => {
+  const s = style(0.5);
+  assert.deepEqual([s.sharpen, s.patience, s.recent, s.stay, s.jitter, s.pace], [1.5, 2, 0.4, 0.75, 0, 1]);
+  assert.deepEqual(shares(0.5), shares(undefined));
+});
+
+test('turning it up gives the model\'s second choices a real chance, and down hardly any', () => {
+  const low = shares(0), mid = shares(0.5), high = shares(1);
+  assert.ok(low.a > 0.97, `safe: favourite ${low.a}`);
+  assert.ok(mid.a > low.a - 0.3 && mid.a < low.a);
+  assert.ok(high.a < 0.5, `daring: favourite ${high.a}`);
+  assert.ok(high.d > 0.05, `daring: the long shot ${high.d}`);
+  assert.ok(low.d < 0.001, `safe: the long shot ${low.d}`);
+});
+
+test('the higher it is, the sooner a held move gives way', () => {
+  const leaves = (daring) => {
+    let n = 0;
+    const group = { every: 8, moves: [{ name: 'a' }, { name: 'b' }] };
+    for (let i = 0; i < 1000; i++) {
+      if (pickMove(group, { probabilities: { a: 0.6, b: 0.4 } }, { current: 'a', heldBars: 16, random: () => (i + 0.5) / 1000, daring }).move) n++;
+    }
+    return n;
+  };
+  assert.ok(leaves(0) < leaves(0.5) && leaves(0.5) < leaves(1), `${leaves(0)} ${leaves(0.5)} ${leaves(1)}`);
+});
+
+test('the higher it is, the less it goes back to what it just played', () => {
+  const back = (daring) => shares(daring, { recent: ['a'] }).a;
+  assert.ok(back(1) < back(0.5) && back(0.5) < back(0), `${back(0)} ${back(0.5)} ${back(1)}`);
+});
+
+test('an ordered group sits still when safe and overshoots when daring', () => {
+  const group = { ordered: true, every: 4, moves: [{ name: 'a' }, { name: 'b' }, { name: 'c' }] };
+  const answer = { score: 2, probabilities: [0, 0, 1] };
+  assert.equal(pickMove(group, answer, { current: 'b', daring: 0 }).move, null, 'a rung away is not enough when safe');
+  assert.equal(pickMove(group, answer, { current: 'b', daring: 0.5 }).move.name, 'c');
+  const heard = new Set();
+  for (let i = 0; i < 100; i++) heard.add(pickMove(group, { score: 1, probabilities: [0, 1, 0] }, { current: 'a', daring: 1, random: () => i / 100 }).move?.name);
+  assert.ok(heard.has('c'), `reached ${[...heard]}`);
+  assert.ok(heard.has('b'));
+});
+
+test('it decides more often when daring and less when safe', () => {
+  const g = { every: 8 };
+  const due = (daring) => Array.from({ length: 32 }, (_, into) => isDue(g, { into }, style(daring).pace)).filter(Boolean).length;
+  assert.deepEqual([due(0), due(0.5), due(1)], [2, 4, 8]);
+  assert.ok(isDue({ every: 1 }, { into: 3 }, 0.5), 'a group that decides every bar can\'t go faster');
+});
+
+test('the model is told only at the ends of the knob', async () => {
+  const told = async (daring) => {
+    const { dj, host, asks } = await aSet({ setup: (s) => { s.dj.daring = daring; } });
+    await play(dj, host, 16 * 9);   // safe decides half as often, so give it time
+    dj.stop();
+    return asks[0].state.attitude;
+  };
+  assert.match(await told(1), /daring/i);
+  assert.match(await told(0), /safe/i);
+  assert.equal(await told(0.5), undefined);
+});
+
+test('full daring never plays a move that failed its test', async () => {
+  const { dj, host, asks, rig } = await aSet({ setup: (s) => {
+    s.dj.daring = 1;
+    s.rig.groups[1].moves[1].test = { ok: false, why: 'silent' };
+  } });
+  await play(dj, host, 200);
+  for (const a of asks) assert.equal(a.questions.fx, undefined);
+  assert.equal(dj.current(rig.groups[1]), 'clean');
+  dj.stop();
+});
+
+test('full daring still goes home when the wall falls silent', async () => {
+  const { dj, host, rig } = await aSet({ setup: (s) => { s.dj.daring = 1; } });
+  await play(dj, host, 70);
+  dj.decide = async () => ({ answers: {} });
+  host.peaks = [0, 0];
+  await play(dj, host, 200);
+  assert.equal(dj.current(rig.groups[1]), 'clean');
+  assert.match(dj.message, /silent/);
+  dj.stop();
 });
 
 // ── a set, against a stand-in host and model ────────────

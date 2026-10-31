@@ -3,7 +3,7 @@
 // Clock gets there. Code decides when something may change and the model decides what; a late or
 // failed answer means nothing changes, and the music never waits for the network.
 import { atHome, checkRig, enterMove, fingerprint, leaveMove } from './rig.js';
-import { isDue, pickMove, questionsFor, sectionAt } from './choose.js';
+import { isDue, pickMove, questionsFor, sectionAt, style } from './choose.js';
 
 const RECENT = 6;        // moves it remembers
 const LOG = 40;
@@ -49,6 +49,11 @@ function auditInWorker(job, onProgress) {
 
 const round1 = (x) => +x.toFixed(1);
 
+// what the model is told at either end of the daring knob; in the middle, nothing
+const attitude = (d) => (d >= 0.75
+  ? 'Be daring: choose the surprising move over the obvious one, take risks, make sharp contrasts.'
+  : d <= 0.25 ? 'Play it safe: stay with what fits, and change only when the music clearly calls for it.' : undefined);
+
 export class DJ extends EventTarget {
   constructor({ graph, host, decide = askServer, audit = auditInWorker, random = Math.random }) {
     super();
@@ -65,6 +70,7 @@ export class DJ extends EventTarget {
     this.testing = null;        // { done, total } while the moves are being tested
     this.auditions = 0;
     this.message = '';
+    this.daring = 0.5;          // the knob: see style() in choose.js
     this.resetStats();
     graph.addEventListener('change', (e) => {
       const { kind, id, name } = e.detail;
@@ -274,7 +280,7 @@ export class DJ extends EventTarget {
     if (this.stats.inRow >= GIVE_UP && bar % 8) return;
     const section = sectionAt(this.rig.arc, bar);
     const due = this.rig.groups
-      .filter((g) => !this.pending.has(g.name) && isDue(g, section))
+      .filter((g) => !this.pending.has(g.name) && isDue(g, section, style(this.daring).pace))
       .map((g) => this.usable(g))
       .filter((g) => g.moves.length > 1);
     if (!due.length) return;
@@ -305,6 +311,7 @@ export class DJ extends EventTarget {
     const change = level && was ? level.db - was.db : 0;
     return {
       direction: this.rig.brief || undefined,
+      attitude: attitude(this.daring),
       music: {
         bpm: Math.round(this.clock().params.bpm),
         bars_played: bar,
@@ -340,6 +347,7 @@ export class DJ extends EventTarget {
         heldBars: bar - (this.changedAt.get(g.name) ?? bar),
         recent: this.recent.filter((r) => r.startsWith(`${g.name}:`)).map((r) => r.slice(g.name.length + 1)),
         random: this.random,
+        daring: this.daring,
       });
       this.odds.set(g.name, odds);
       if (move) this.pending.set(g.name, { move, by: 'dj', odds });

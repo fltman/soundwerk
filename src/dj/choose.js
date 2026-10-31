@@ -3,9 +3,19 @@
 // from those odds, so the same moment doesn't always get the same answer, and a
 // move that has been on for a long time slowly loses out.
 
-const SHARPEN = 1.5;    // favours the moves the model likes most
-const RECENT_PENALTY = 0.4;
-const STAY_BAND = 0.75; // an ordered group moves only when the music is this far from where it is
+// The daring knob. 0 plays it safe, 1 goes looking for trouble, and 0.5 is the DJ as it always was.
+// It only changes how the DJ chooses among moves that passed their test; what it may do never changes.
+export function style(daring = 0.5) {
+  const k = 1 - 2 * daring;              // 1 safe, 0 the middle, −1 daring
+  return {
+    sharpen: 1.5 * 3 ** k,               // favours the moves the model likes most
+    patience: 2 * 3 ** k,                // phrases before a held move has lost half its pull
+    recent: Math.min(1, 0.4 * 2.5 ** k), // how much a move just played counts against itself
+    stay: 0.75 * 1.7 ** k,               // an ordered group moves only when the music is this far away
+    jitter: Math.max(0, -k),             // rungs an ordered group may overshoot
+    pace: daring >= 0.75 ? 0.5 : daring <= 0.25 ? 2 : 1,   // phrases between decisions, as a share
+  };
+}
 
 export function questionsFor(groups) {
   const out = {};
@@ -30,25 +40,27 @@ export function sectionAt(arc, bar) {
 }
 
 // Does this group decide before `section.into`? Phrases count from the start of the section.
-export const isDue = (group, section) => (group.on_section && section.into === 0) || section.into % group.every === 0;
+export const isDue = (group, section, pace = 1) => (group.on_section && section.into === 0) || section.into % Math.max(1, group.every * pace) === 0;
 
 // → { move, odds: { name: 0..1 } }. move is null when the group should stay as it is.
-export function pickMove(group, answer, { current, heldBars = 0, recent = [], random = Math.random }) {
+export function pickMove(group, answer, { current, heldBars = 0, recent = [], random = Math.random, daring = 0.5 }) {
+  const { sharpen, patience, recent: again, stay, jitter } = style(daring);
   if (group.ordered) {
-    const score = Number(answer?.score);
-    if (!Number.isFinite(score)) return { move: null, odds: {} };
+    const heard = Number(answer?.score);
+    if (!Number.isFinite(heard)) return { move: null, odds: {} };
+    const score = jitter ? heard + (random() - 0.5) * 2 * jitter : heard;
     const level = Math.max(0, Math.min(group.moves.length - 1, Math.round(score)));
     const at = group.moves.findIndex((m) => m.name === current);
     const odds = Object.fromEntries(group.moves.map((m, i) => [m.name, answer.probabilities?.[i] ?? 0]));
-    if (at >= 0 && Math.abs(score - at) < STAY_BAND) return { move: null, odds };
+    if (at >= 0 && Math.abs(score - at) < stay) return { move: null, odds };
     return { move: level === at ? null : group.moves[level], odds };
   }
   const given = answer?.probabilities;
   if (!given) return { move: null, odds: {} };
   const weights = group.moves.map((m) => {
-    let w = Math.max(Number(given[m.name]) || 0, 0.01) ** SHARPEN;
-    if (m.name === current) w *= 0.5 ** (heldBars / (group.every * 2));
-    else if (recent.includes(m.name)) w *= RECENT_PENALTY;
+    let w = Math.max(Number(given[m.name]) || 0, 0.01) ** sharpen;
+    if (m.name === current) w *= 0.5 ** (heldBars / (group.every * patience));
+    else if (recent.includes(m.name)) w *= again;
     return w;
   });
   const total = weights.reduce((s, w) => s + w, 0);
