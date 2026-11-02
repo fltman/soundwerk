@@ -320,7 +320,7 @@ export class Wall extends EventTarget {
   }
 
   // Drag up or to the right to raise. Shift is fine control, double-click resets, right-click types.
-  bindDrag(target, { get, set, min, max, step = 0, reset, label, format }) {
+  bindDrag(target, { get, set, min, max, step = 0, reset, label, format, knob }) {
     const g = this.graph;
     let drag = null;
     const apply = (raw) => {
@@ -367,12 +367,24 @@ export class Wall extends EventTarget {
       document.body.append(input);
       input.select();
       let closed = false;
+      const learn = knob ? el('button', 'mini value-learn', 'MIDI LEARN') : null;
       const done = (ok) => {
         if (closed) return;
         closed = true;
         if (ok && input.value.trim() !== '' && Number.isFinite(Number(input.value))) { apply(Number(input.value)); this.hideTip(); g.commit(); }
         input.remove();
+        learn?.remove();
       };
+      if (learn) {
+        learn.style.left = input.style.left;
+        learn.style.top = `${e.clientY + 26}px`;
+        learn.addEventListener('pointerdown', (p) => p.preventDefault());
+        learn.addEventListener('click', () => {
+          done(false);
+          this.dispatchEvent(new CustomEvent('midi-learn', { detail: { ...knob, label } }));
+        });
+        document.body.append(learn);
+      }
       input.addEventListener('keydown', (k) => { k.stopPropagation(); if (k.key === 'Enter') done(true); if (k.key === 'Escape') done(false); });
       input.addEventListener('blur', () => done(true));
     });
@@ -393,6 +405,7 @@ export class Wall extends EventTarget {
     this.bindDrag(dial, {
       get: () => node.params[p.name], set: (val) => g.setParam(node.id, p.name, val),
       min: p.min, max: p.max, step: p.step, reset: p.default, label: `${v.def.title} · ${p.label ?? p.name}`, format: (val) => fmtValue(p, val),
+      knob: { id: node.id, name: p.name },
     });
     v.knobs.set(p.name, { p, show });
     const k = cvs.indexOf(p);
@@ -412,6 +425,7 @@ export class Wall extends EventTarget {
     this.bindDrag(track, {
       get: () => node.params[p.name], set: (val) => g.setParam(node.id, p.name, val),
       min: p.min, max: p.max, step: p.step, reset: p.default, label: `${v.def.title} · ${p.label ?? p.name}`, format: (val) => fmtValue(p, val),
+      knob: { id: node.id, name: p.name },
     });
     v.knobs.set(p.name, { p, show });
     return box;

@@ -90,12 +90,22 @@ export const seqswitch = {
   params: [{ name: 'steps', label: 'STEPS', min: 2, max: 4, default: 4, step: 1 }],
   lights: [1, 2, 3, 4].map((n) => ({ name: `l${n}`, label: '', color: 'green' })),
   dsp: class SeqSwitch extends Module {
-    constructor(sr) { super(sr); this.clk = new Trigger(); this.rst = new Trigger(); this.k = 0; }
+    constructor(sr) { super(sr); this.clk = new Trigger(); this.rst = new Trigger(); this.k = 0; this.swallow = false; }
+    // a reset on the first pulse swallows it, so a patched reset costs a pulse
+    rewind() { this.k = 0; this.swallow = this.linked[5] === 1; }
+    advance(n, p) {
+      if (n <= 0) return;
+      this.k = (this.k + n - (this.swallow ? 1 : 0)) % p[0];
+      this.swallow = false;
+    }
     tick(i, o, p) {
       // both triggers tick every sample, or a clock on the reset sample arrives one sample late
       const rst = this.rst.tick(i[5]), clk = this.clk.tick(i[4]);
-      if (rst) this.k = 0;
-      else if (clk) this.k = (this.k + 1) % p[0];
+      if (rst) { this.k = 0; this.swallow = false; }
+      else if (clk) {
+        if (this.swallow) this.swallow = false;
+        else this.k = (this.k + 1) % p[0];
+      }
       o[0] = i[this.k];
       for (let n = 0; n < 4; n++) this.ui[n] = n === this.k ? 1 : 0;
     }

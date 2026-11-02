@@ -12,6 +12,7 @@ export class Graph extends EventTarget {
     this.future = [];
     this.wholePatches = new Set();   // snapshots that replaced everything: going back to one rebuilds
     this.rig = null;                 // what the live DJ may do to this patch
+    this.midiMap = {};               // "channel:cc" → { id, name }: controllers learned onto knobs
   }
 
   def(node) { return defFor(node); }
@@ -146,6 +147,7 @@ export class Graph extends EventTarget {
       links: [...this.links.values()].map((l) => ({ ...l })),
       nextId: this.nextId,   // ids are never reused: a rig remembers the ones it added
       ...(this.rig ? { rig: structuredClone(this.rig) } : {}),
+      ...(Object.keys(this.midiMap).length ? { midiMap: structuredClone(this.midiMap) } : {}),
     };
   }
 
@@ -172,6 +174,7 @@ export class Graph extends EventTarget {
     }
     this.nextId = Math.max(max + 1, json.nextId ?? 0);
     this.rig = json.rig ? structuredClone(json.rig) : null;
+    this.midiMap = structuredClone(json.midiMap ?? {});
     this.changed('load');
   }
 

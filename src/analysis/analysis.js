@@ -147,7 +147,8 @@ export function analyze(samples, sampleRate, onProgress = () => {}) {
   const novelty = subtractLocalMean(env, Math.round(fr * 0.5));
   const period = estimatePeriod(novelty, fr);
   const beatFrames = trackBeats(novelty, period);
-  const beats = Float64Array.from(beatFrames, (b) => b / fr);
+  const tracked = Float64Array.from(beatFrames, (b) => b / fr);
+  const beats = steadyBeats(tracked, kickOffsets(tracked, samples, sampleRate, onsets.kick.times));
   const bpm = beats.length > 8 ? fitBpm(beats) : (60 * fr) / period;
   const downbeat = findDownbeat(beatFrames, flux, [level, ...Object.values(bands)]);
 
@@ -174,6 +175,110 @@ export function analyze(samples, sampleRate, onProgress = () => {}) {
     beats,
     downbeat,
   };
+}
+
+const STRAIGHT = 0.02;   // seconds a beat may stray from a stretch's line
+const CORNER = 2;        // beats either side that round off the join between two stretches
+const NUDGE_BEATS = 8;   // hits a stretch needs before they may move it
+const FOLLOW = 0.008;    // seconds from a line that a kick is still on it
+const STRAY = 0.07;      // seconds from such a line that the tracker may be, where no kick says otherwise
+const SIDE = 6;          // ms either side of a kick's front that are compared
+
+// The longest stretches that a straight line holds, as [first beat, last beat, time of the first, seconds a beat]
+function stretches(beats) {
+  const out = [];
+  const line = (a, b) => {
+    const n = b - a + 1, mx = (n - 1) / 2;
+    let my = 0, sxy = 0, sxx = 0;
+    for (let k = 0; k < n; k++) my += beats[a + k] / n;
+    for (let k = 0; k < n; k++) { sxy += (k - mx) * (beats[a + k] - my); sxx += (k - mx) ** 2; }
+    const slope = sxx ? sxy / sxx : 0, t0 = my - slope * mx;
+    let worst = 0;
+    for (let k = 0; k < n; k++) worst = Math.max(worst, Math.abs(beats[a + k] - (t0 + slope * k)));
+    return { t0, slope, worst };
+  };
+  for (let a = 0; a < beats.length;) {
+    let b = Math.min(a + 1, beats.length - 1), fit = line(a, b);
+    for (let c = b + 1; c < beats.length; c++) {
+      const next = line(a, c);
+      if (next.worst > STRAIGHT) break;
+      b = c; fit = next;
+    }
+    out.push([a, b, fit.t0, fit.slope]);
+    a = b + 1;
+  }
+  return out;
+}
+
+// How far each kick's front sits from its beat, NaN where there is no kick. In the whole band: a
+// kick starts high and sweeps down, so in the lows, where kicks and beats were found, it shows up
+// tens of milliseconds after it really started. That's why this looks further back than forward.
+export function kickOffsets(beats, samples, sr, kicks) {
+  const size = Math.round(sr * 0.001), back = 0.08, ahead = 0.03, reach = 0.045, count = Math.round(((back + ahead) * sr) / size);
+  const out = new Float64Array(beats.length).fill(NaN);
+  let k = 0;
+  for (let b = 0; b < beats.length; b++) {
+    while (k < kicks.length && kicks[k] < beats[b] - reach) k++;
+    if (k >= kicks.length || kicks[k] > beats[b] + reach) continue;
+    const from = Math.max(0, Math.round((beats[b] - back) * sr));
+    // what comes after each millisecond against what came before it: a mix is never quiet in front
+    // of a kick, and inside a kick the energy jumps about, but its way in is one clear step
+    const sum = new Float64Array(count + 1);
+    for (let w = 0; w < count; w++) {
+      let e = 0;
+      for (let i = 0; i < size; i++) { const v = samples[from + w * size + i] ?? 0; e += v * v; }
+      sum[w + 1] = sum[w] + e;
+    }
+    let top = 0, at = -1;
+    for (let w = SIDE; w + SIDE <= count; w++) {
+      const rise = sum[w + SIDE] - 2 * sum[w] + sum[w - SIDE];
+      if (rise > top) { top = rise; at = w; }
+    }
+    if (at >= 0) out[b] = (from + at * size) / sr - beats[b];
+  }
+  return out;
+}
+
+// A track holds its tempo in long straight stretches, joined where a song was extended or a band
+// moved, and the tracker wanders a few milliseconds around them. A deck following the beats would
+// play that as a wobble in pitch, so each stretch becomes its line, with its kicks on the beat, and
+// only the corners between stretches are rounded. Where kicks start the tracker needs a few bars to
+// catch up, and that's where a drop lands, so a line with kicks on it runs on into the beats around
+// it for as long as they agree with it.
+export function steadyBeats(beats, offsets = []) {
+  const n = beats.length;
+  if (n < 4) return beats;
+  const owner = new Array(n), lines = stretches(beats).map(([a, b, t0, slope]) => {
+    const seen = [];
+    for (let k = a; k <= b; k++) if (Number.isFinite(offsets[k])) seen.push(offsets[k]);
+    seen.sort((x, y) => x - y);
+    const sure = seen.length >= NUDGE_BEATS, nudge = sure ? seen[seen.length >> 1] : 0;
+    const line = { a, b, kicks: sure ? seen.length : 0, at: (k) => t0 + slope * (k - a) + nudge };
+    owner.fill(line, a, b + 1);
+    return line;
+  });
+  const agrees = (line, k) => (Number.isFinite(offsets[k]) ? Math.abs(beats[k] + offsets[k] - line.at(k)) < FOLLOW : Math.abs(beats[k] - line.at(k)) < STRAY);
+  for (const line of lines.filter((l) => l.kicks).sort((x, y) => y.kicks - x.kicks)) {
+    for (let k = line.a - 1; k >= 0 && owner[k].kicks < line.kicks && agrees(line, k); k--) owner[k] = line;
+    for (let k = line.b + 1; k < n && owner[k].kicks < line.kicks && agrees(line, k); k++) owner[k] = line;
+  }
+  const straight = Float64Array.from(owner, (line, k) => line.at(k));
+  return straight.map((_, k) => {
+    const r = Math.min(CORNER, k, n - 1 - k);
+    let s = 0;
+    for (let j = k - r; j <= k + r; j++) s += straight[j];
+    return s / (2 * r + 1);
+  });
+}
+
+// Sixteenths from the first downbeat on, interpolated between the beats, so the wall
+// follows the track's real timing instead of a fixed tempo.
+export function sixteenthGrid(beats, downbeat) {
+  const grid = [];
+  for (let i = downbeat; i + 1 < beats.length; i++) {
+    for (let k = 0; k < 4; k++) grid.push(beats[i] + ((beats[i + 1] - beats[i]) * k) / 4);
+  }
+  return Float64Array.from(grid);
 }
 
 // ── helpers ──────────────────────────────────────────────────

@@ -85,6 +85,11 @@ export class DJ extends EventTarget {
 
   get rig() { return this.graph.rig; }
 
+  // Where the music is: a playlist has a shape of its own, a wall goes round its arc
+  section(bar) {
+    return this.conductor?.section(bar + (this.bar ?? 0) - this.played) ?? sectionAt(this.rig.arc, bar);
+  }
+
   clock() { return [...this.graph.nodes.values()].find((n) => n.type === 'clock'); }
 
   group(name) { return this.rig?.groups.find((g) => g.name === name); }
@@ -170,6 +175,7 @@ export class DJ extends EventTarget {
     if (problems.length) return this.say(`The rig no longer fits the patch: ${problems[0]}`);
     this.starting = true;
     await host.start().finally(() => { this.starting = false; });
+    if (this.conductor?.plan && !this.conductor.running) await this.conductor.start();
     this.resetStats();
     this.pending.clear();
     this.recent = [];
@@ -278,7 +284,12 @@ export class DJ extends EventTarget {
   // ── asking ────────────────────────────────────────────
   ask(bar) {
     if (this.stats.inRow >= GIVE_UP && bar % 8) return;
-    const section = sectionAt(this.rig.arc, bar);
+    const section = this.section(bar);
+    if (section.name === 'transition') {
+      // the plan has the floor: the knobs go home for it, and the DJ waits
+      if (section.into === 0) for (const g of this.rig.groups) if (this.current(g) !== g.moves[0].name) this.pending.set(g.name, { move: g.moves[0], by: 'set' });
+      return;
+    }
     const due = this.rig.groups
       .filter((g) => !this.pending.has(g.name) && isDue(g, section, style(this.daring).pace))
       .map((g) => this.usable(g))

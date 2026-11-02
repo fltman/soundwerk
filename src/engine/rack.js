@@ -84,6 +84,7 @@ export class Rack {
     this.freeWaves = [];
     this.nextWave = 0;
     this.onError = null;  // (module id, message): a Code module threw
+    this.onMidi = null;   // (module id, [[sample, ...bytes]]): what a MIDI Out has to say
     this.queued = [];     // changes waiting for a step of a Clock, in order
     this.fadeLength = Math.round(sampleRate * 0.005);
   }
@@ -142,7 +143,9 @@ export class Rack {
   message(id, msg) {
     const m = this.modules.get(id);
     if (!m) return;
-    if (msg.kind === 'buffer') m.file = msg;
+    if (msg.kind === 'rewind') { m.dsp.rewind?.(); return; }
+    if (msg.kind === 'advance') { m.dsp.advance?.(msg.n, m.p); return; }
+    if (msg.kind === 'buffer' || msg.kind === 'bridge') m.file = msg;
     else if (msg.kind === 'clear') m.file = null;
     m.dsp.onMessage(msg);
   }
@@ -351,6 +354,10 @@ export class Rack {
       if (m.dsp.errorText) {
         this.onError?.(m.id, m.dsp.errorText);
         m.dsp.errorText = null;
+      }
+      if (m.dsp.outgoing?.length) {
+        this.onMidi?.(m.id, m.dsp.outgoing);
+        m.dsp.outgoing = [];
       }
       for (let w = 0; w < m.wires.length; w++) {
         const c = m.wires[w];

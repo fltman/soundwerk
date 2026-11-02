@@ -26,13 +26,33 @@ const buffer = (length) => Float32Array.from({ length }, (_, n) => 0.8 * Math.si
 const SETUP = {
   deck: (m) => m.onMessage({ kind: 'buffer', L: buffer(48000), sr: 48000 }),
   sampler: (m) => m.onMessage({ kind: 'buffer', L: buffer(1500), sr: 48000 }),
+  slicer: (m) => {
+    m.onMessage({ kind: 'buffer', L: buffer(48000), sr: 48000 });
+    m.onData({
+      pool: [{ at: 0, end: 0.2, steps: 4, kicks: [0.05] }, { at: 0.3, end: 0.4, steps: 2 }],
+      pads: [0, 1, 0, 1, 0, 1, 0, 1],
+      steps: [0, -1, -1, -1, 1, -1, 1, -1, 0, -1, -1, 1, -1, 1, -1, -1],
+    });
+  },
+  set: (m) => {
+    const grid = Float64Array.from({ length: 96 }, (_, k) => k * 0.11);
+    m.onMessage({ kind: 'buffer', L: buffer(96000), sr: 48000, grid, from: 0 });
+  },
   midi: (m) => {
     m.onMessage({ kind: 'midi', data: [0x90, 64, 100] });
     m.onMessage({ kind: 'midi', data: [0x90, 60, 100] });
     m.onMessage({ kind: 'midi', data: [0xe0, 0, 127] });
+    m.onMessage({ kind: 'midi', data: [0xb0, 0, 20] });
+    m.onMessage({ kind: 'midi', data: [0xb0, 127, 110] });
+  },
+  // a plugin that hands every block straight back, a third as loud
+  vst: (m) => {
+    const port = { postMessage(buffer) { new Float32Array(buffer, 12, 512).forEach((v, k, x) => { x[k] = v / 3; }); this.onmessage({ data: buffer }); } };
+    m.onMessage({ kind: 'bridge', port });
   },
 };
 const render = (def, opts) => renderModule(def.type, { data: def.defaultData?.(), setup: SETUP[def.type], ...opts });
+
 
 const digest = (r, def) => {
   let h = 0;

@@ -9,6 +9,12 @@ class SoundwerkProcessor extends AudioWorkletProcessor {
     super();
     this.rack = new Rack({ sampleRate, telemetry: new Float32Array(options.processorOptions.sab) });
     this.rack.onError = (id, text) => this.port.postMessage({ t: 'error', id, text });
+    // in the seconds of the audio clock, which the main thread can turn into the MIDI port's
+    this.rack.onMidi = (id, events) => {
+      const zero = currentTime - (this.rack.samples - this.frames) / sampleRate;
+      this.port.postMessage({ t: 'midi', id, events: events.map(([at, ...data]) => ({ at: zero + at / sampleRate, data })) });
+    };
+    this.frames = 128;
     this.broken = false;
     this.recording = false;
     this.recL = null;
@@ -45,6 +51,7 @@ class SoundwerkProcessor extends AudioWorkletProcessor {
     const out = outputs[0], L = out[0], R = out[1] ?? out[0];
     const input = inputs[0];
     const t0 = now();
+    this.frames = L.length;
     // an exception here would end the processor for good; a module bug shouldn't take the wall down
     try {
       this.rack.process(L, R, L.length, input?.[0], input?.[1] ?? input?.[0]);

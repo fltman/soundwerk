@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { lufs, tonalBalance, analyzeRender } from '../src/listen/analyze.js';
-import { sixteenthGrid } from '../src/ui/files.js';
+import { sixteenthGrid } from '../src/analysis/analysis.js';
 
 const SR = 48000;
 const sine = (hz, db, seconds = 6) => Float32Array.from({ length: seconds * SR }, (_, n) => 10 ** (db / 20) * Math.sin((2 * Math.PI * hz * n) / SR));

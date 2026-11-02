@@ -1,5 +1,5 @@
 // The end of the signal path: the desk, and the one output that reaches your ears.
-import { Module, DCBlock, fmtPct } from './lib/index.js';
+import { Module, DCBlock, TAU, fmtPct } from './lib/index.js';
 
 const eight = (fn) => Array.from({ length: 8 }, (_, k) => fn(k + 1, k));
 
@@ -96,4 +96,60 @@ export const master = {
   },
 };
 
-export const mix = [desk, master];
+// Two stereo sources into one, as a DJ mixer does it: a fader between them and, on a knob of its
+// own, which of them has the bass. Both knobs are eased on the sample, so they can be thrown on a
+// downbeat without a click.
+export const djmix = {
+  type: 'djmix', title: 'DJ MIXER', category: 'mix',
+  description: 'Two stereo channels with a crossfader, and a knob for which of them keeps the bass',
+  tags: ['crossfade', 'transition', 'bass swap', 'dj', 'blend', 'stereo'],
+  inputs: [
+    { name: 'aL', label: 'A L', kind: 'audio' }, { name: 'aR', label: 'A R', kind: 'audio' },
+    { name: 'bL', label: 'B L', kind: 'audio' }, { name: 'bR', label: 'B R', kind: 'audio' },
+  ],
+  outputs: [{ name: 'l', label: 'L', kind: 'audio' }, { name: 'r', label: 'R', kind: 'audio' }],
+  params: [
+    { name: 'fade', label: 'A – B', min: 0, max: 1, default: 0, size: 'L', format: fmtPct },
+    { name: 'lows', label: 'LOWS', min: 0, max: 1, default: 0, format: fmtPct },
+  ],
+  dsp: class DjMix extends Module {
+    constructor(sr) {
+      super(sr);
+      this.s = new Float64Array(16);
+      this.bass = Math.tan((TAU * 0.5 * 150) / sr);   // 24 dB an octave at 150 Hz
+      this.ease = 1 - Math.exp(-1 / (0.005 * sr));
+      this.fade = 0; this.lows = 0; this.ga = 1; this.gb = 0;
+    }
+    // two filters in a row on one side of a channel; k is where its state starts
+    noBass(k, x) {
+      const s = this.s, g = this.bass, r = 1.41421356, a = 1 / (1 + g * (g + r));
+      let hp = (x - (g + r) * s[k] - s[k + 1]) * a;
+      let bp = g * hp + s[k];
+      s[k + 1] += 2 * g * bp;
+      s[k] = g * hp + bp;
+      x = hp;
+      hp = (x - (g + r) * s[k + 2] - s[k + 3]) * a;
+      bp = g * hp + s[k + 2];
+      s[k + 3] += 2 * g * bp;
+      s[k + 2] = g * hp + bp;
+      return hp;
+    }
+    tick(i, o, p) {
+      if (this.fade !== p[0]) {
+        this.fade += (p[0] - this.fade) * this.ease;
+        if (Math.abs(p[0] - this.fade) < 1e-5) this.fade = p[0];
+        this.ga = Math.cos(this.fade * TAU * 0.25);
+        this.gb = Math.sin(this.fade * TAU * 0.25);
+      }
+      this.lows += (p[1] - this.lows) * this.ease;
+      const a = Math.min(1, 2 - 2 * this.lows), b = Math.min(1, 2 * this.lows);
+      const al = i[0], ar = this.linked[1] ? i[1] : al, bl = i[2], br = this.linked[3] ? i[3] : bl;
+      const l0 = al * a + this.noBass(0, al) * (1 - a), r0 = ar * a + this.noBass(4, ar) * (1 - a);
+      const l1 = bl * b + this.noBass(8, bl) * (1 - b), r1 = br * b + this.noBass(12, br) * (1 - b);
+      o[0] = l0 * this.ga + l1 * this.gb;
+      o[1] = r0 * this.ga + r1 * this.gb;
+    }
+  },
+};
+
+export const mix = [desk, djmix, master];

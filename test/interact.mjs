@@ -2,18 +2,23 @@
 // moving modules, adding one, undoing, and painting a sequencer.
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const PORT = 20000 + Math.floor(Math.random() * 20000);
-const server = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(PORT) }, stdio: ['ignore', 'pipe', 'ignore'] });
+// never the real one, which holds what a person taught it: and inside data/, to see it isn't served
+const TASTE = fileURLToPath(new URL('../data/interact-taste.json', import.meta.url));
+rmSync(TASTE, { force: true });
+const server = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(PORT), SOUNDWERK_TASTE: TASTE }, stdio: ['ignore', 'pipe', 'ignore'] });
 await new Promise((r) => server.stdout.once('data', r));
 mkdirSync('test/out', { recursive: true });
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--autoplay-policy=no-user-gesture-required', '--mute-audio', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
 const page = await browser.newPage({ viewport: { width: 1680, height: 1000 }, deviceScaleFactor: 1 });
 const problems = [];
-page.on('console', (m) => { if (m.type() === 'error') problems.push(m.text()); });
+// a 501 is how the server says this machine has no Demucs, and the browser logs every one
+page.on('console', (m) => { if (m.type() === 'error' && !m.text().includes('status of 501')) problems.push(m.text()); });
 page.on('pageerror', (e) => problems.push(e.message));
 await page.goto(`http://localhost:${PORT}/`);
 await page.evaluate(() => localStorage.clear());
@@ -297,6 +302,73 @@ await step('a dropped audio file plays on a deck, and the beat grid comes out of
   assert.ok(await outLevel('deck', 's16') > -1, 'telemetry is alive');
 });
 
+await step('a track dropped on a Slicer is cut, and its grid plays by mouse', async () => {
+  const r = await page.evaluate(async () => {
+    const { graph, wall } = window.soundwerk;
+    const sr = 44100, n = sr * 12, pcm = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      const t = i / sr, b = t % 0.5;
+      pcm[i] = 24000 * Math.exp(-b * 18) * Math.sin(2 * Math.PI * (55 + 90 * Math.exp(-b * 40)) * b);
+    }
+    const head = new DataView(new ArrayBuffer(44));
+    const str = (o, s) => { for (let i = 0; i < 4; i++) head.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); head.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true);
+    head.setUint32(24, sr, true); head.setUint32(28, sr * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true);
+    str(36, 'data'); head.setUint32(40, n * 2, true);
+    const node = graph.addNode('slicer', 4, 40);
+    graph.commit();
+    wall.frameAll();
+    await new Promise((r) => setTimeout(r, 50));
+    const box = document.querySelector(`.mod[data-id="${node.id}"]`).getBoundingClientRect();
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([head.buffer, pcm.buffer], 'drop.wav', { type: 'audio/wav' }));
+    const before = graph.nodes.size;
+    // the same event the Finder sends, at the panel
+    window.dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 }));
+    return { id: node.id, before, at: document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('.mod')?.dataset.id };
+  });
+  await page.waitForFunction((id) => window.soundwerk.host.buffers.has(id), r.id, { timeout: 15000 });
+  await page.waitForFunction((id) => window.soundwerk.graph.nodes.get(id).data.pool.length > 0, r.id);
+  const state = () => page.evaluate((id) => {
+    const { graph, host } = window.soundwerk;
+    const n = graph.nodes.get(id);
+    return { size: graph.nodes.size, file: n.data.file, pool: n.data.pool.length, pads: [...n.data.pads], steps: [...n.data.steps], buffered: host.buffers.has(id) };
+  }, r.id);
+  const first = await state();
+  assert.equal(r.at, r.id, 'the drop point is on the panel');
+  assert.equal(first.size, r.before, 'no Track Deck appeared');
+  assert.equal(first.file, 'drop.wav');
+  assert.ok(first.pool > 8, `${first.pool} slices`);
+  assert.equal(first.steps[0], 0, 'it starts on a bar');
+  // a real click on row b, step 5, and on the label of row a
+  await page.evaluate((id) => window.soundwerk.wall.select(id), r.id);
+  const box = await page.locator(`.mod[data-id="${r.id}"] canvas.grid-canvas`).boundingBox();
+  const LEFT = (75 / 470) * box.width, COL = (box.width - LEFT) / 16, ROW = box.height / 8;
+  await page.mouse.click(box.x + LEFT + 4.5 * COL, box.y + 1.5 * ROW);
+  const clicked = await state();
+  assert.equal(clicked.steps[4], 1, 'row b, step 5');
+  await page.mouse.click(box.x + 20, box.y + ROW * 0.5);
+  const moved = await state();
+  assert.notEqual(moved.pads[0], clicked.pads[0], 'the label moves the pad on');
+  const pool = await page.evaluate((id) => window.soundwerk.graph.nodes.get(id).data.pool.map((s) => s.kind), r.id);
+  assert.equal(pool[moved.pads[0]], pool[clicked.pads[0]], 'to a slice of the same kind');
+  await page.keyboard.press('Meta+z');
+  await page.keyboard.press('Meta+z');
+  const back = await state();
+  assert.deepEqual([back.pads, back.steps], [first.pads, first.steps], 'undo takes both back');
+  assert.ok(back.buffered, 'and keeps the file');
+  await page.waitForTimeout(200);
+  assert.ok(await page.isVisible(`.mod[data-id="${r.id}"] .wave-btn`), 'STEMS is on offer');
+  await page.evaluate((id) => {
+    const { graph, wall } = window.soundwerk;
+    graph.removeNode(id);
+    graph.commit();
+    wall.select(null);
+    wall.frameAll();
+  }, r.id);
+});
+
 await step('the computer keyboard plays a selected MIDI module', async () => {
   const id = await page.evaluate(() => {
     const { graph, wall } = window.soundwerk;
@@ -567,15 +639,393 @@ await step('a duplicated sampler keeps its sound', async () => {
   assert.ok(has);
 });
 
+await step('a playlist dropped on a Set is measured, planned by the assistant, heard and played from its panel', async () => {
+  // a machine without Demucs: the set still works, with samples of the whole mix
+  await page.route('**/api/stems', (route) => route.fulfill({ status: 501, json: { error: 'Demucs is not installed' } }));
+  // a stand-in for the assistant: it wires the Set into the rack, then sends a plan, then says it's done
+  let rounds = 0, asked = '', answered = '', fix = null, later = null;
+  await page.route('**/api/chat', async (route) => {
+    const call = (name, args) => ({ message: { role: 'assistant', content: '', tool_calls: [{ id: `c${rounds}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] }, finish: 'tool_calls' });
+    const { clock, set, out } = await page.evaluate(() => {
+      const { graph } = window.soundwerk, of = (t) => [...graph.nodes.values()].find((n) => n.type === t)?.id;
+      return { clock: of('clock'), set: of('set'), out: of('master') };
+    });
+    rounds++;
+    if (rounds === 1) return route.fulfill({ json: call('edit_patch', { operations: [{ op: 'add', type: 'djmix', ref: 'mix' }, { op: 'connect', from: set, from_port: 'l', to: 'mix', to_port: 'bL' }, { op: 'connect', from: set, from_port: 'r', to: 'mix', to_port: 'bR' }, { op: 'set', id: 'mix', params: { fade: 1, lows: 1 } }, { op: 'connect', from: 'mix', from_port: 'l', to: out, to_port: 'l' }, { op: 'connect', from: 'mix', from_port: 'r', to: out, to_port: 'r' }] }) });
+    if (rounds === 2) return route.fulfill({ json: call('set_plan', { brief: 'a test set', arc: [{ name: 'transition', bars: 44 }], tracks: [{ track: 0, at: 0, enter: 8, leave: 24 }, { track: 1, at: 20, enter: 8, leave: 24 }], moves: [{ at: 0, ops: [{ op: 'set', id: clock, params: { bpm: 120 } }] }, { at: 16, glide: 4, why: 'on to the next tempo', ops: [{ op: 'set', id: clock, params: { bpm: 124 } }] }] }) });
+    if (rounds === 4) {
+      fix = route.request().postDataJSON();
+      asked = fix.messages.at(-1).content;
+      return route.fulfill({ json: call('edit_plan', { remove: [1], add: [{ at: 26, glide: 2, why: 'quicker', ops: [{ op: 'set', id: clock, params: { bpm: 124 } }] }], brief: 'the same set, mended' }) });
+    }
+    if (rounds === 5) answered = route.request().postDataJSON().messages.at(-1).content;
+    if (rounds === 6) later = route.request().postDataJSON();
+    return route.fulfill({ json: { message: { role: 'assistant', content: 'The set is planned.' }, finish: 'stop' } });
+  });
+  await page.selectOption('#examples', { label: 'Empty wall' });
+  await page.waitForFunction(() => window.soundwerk.graph.nodes.size === 1);
+  const id = await page.evaluate(async () => {
+    const { graph, wall } = window.soundwerk;
+    const wav = (name, bpm) => {
+      const sr = 44100, n = sr * 70, pcm = new Int16Array(n), beat = 60 / bpm;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr, b = t % beat, gone = t > 32 * beat && t < 48 * beat;   // a break to give it a shape
+        pcm[i] = (gone ? 0 : 20000 * Math.exp(-b * 14) * Math.sin(2 * Math.PI * (50 + 150 * Math.exp(-b * 45)) * b)) + 4000 * Math.sin(2 * Math.PI * 110 * t);
+      }
+      const head = new DataView(new ArrayBuffer(44));
+      const str = (o, s) => { for (let i = 0; i < 4; i++) head.setUint8(o + i, s.charCodeAt(i)); };
+      str(0, 'RIFF'); head.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+      head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true);
+      head.setUint32(24, sr, true); head.setUint32(28, sr * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true);
+      str(36, 'data'); head.setUint32(40, n * 2, true);
+      return new File([head.buffer, pcm.buffer], name, { type: 'audio/wav' });
+    };
+    const node = graph.addNode('set', 1, 0);
+    graph.commit();
+    wall.frameAll();
+    await new Promise((r) => setTimeout(r, 50));
+    const box = document.querySelector(`.mod[data-id="${node.id}"]`).getBoundingClientRect();
+    const transfer = new DataTransfer();
+    transfer.items.add(wav('2 second.wav', 124));   // out of order, as a Finder selection can be
+    transfer.items.add(wav('1 first.wav', 120));
+    window.dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 }));
+    return node.id;
+  });
+  const read = () => page.evaluate((x) => {
+    const { graph, conductor, host } = window.soundwerk, d = graph.nodes.get(x).data;
+    return { files: d.tracks.map((t) => t.file), bpm: d.tracks.map((t) => t.bpm), plan: d.plan, set: conductor.running, running: host.running };
+  }, id);
+  await page.waitForFunction((x) => window.soundwerk.graph.nodes.get(x).data.tracks.length === 2, id, { timeout: 30000 });
+  const dropped = await read();
+  assert.deepEqual(dropped.files, ['1 first.wav', '2 second.wav'], 'in the order of their names');
+  assert.ok(Math.abs(dropped.bpm[0] - 120) < 1 && Math.abs(dropped.bpm[1] - 124) < 1, dropped.bpm.join());
+  assert.equal(await page.locator(`.mod[data-id="${id}"] .set-play`).isVisible(), false, 'nothing to play before there is a plan');
+  await page.evaluate((x) => window.soundwerk.wall.select(x), id);
+  await page.locator(`.mod[data-id="${id}"] .set-plan`).click();
+  await page.waitForFunction((x) => window.soundwerk.graph.nodes.get(x).data.plan && !window.soundwerk.chat.busy, id, { timeout: 60000 });
+  const planned = await read();
+  assert.equal(planned.plan.brief, 'a test set');
+  assert.equal(rounds, 3, 'the assistant was asked, and it read the answer of the render');
+  assert.ok(await page.evaluate(() => window.soundwerk.chat.history.some((m) => m.role === 'tool' && /LUFS by bar/.test(m.content))), 'what was measured went back to it');
+  await page.locator(`.mod[data-id="${id}"] .set-play`).click();
+  await page.waitForFunction(() => window.soundwerk.conductor.running && window.soundwerk.conductor.step > 8, null, { timeout: 15000 });
+  assert.ok((await page.evaluate(() => Math.max(...window.soundwerk.host.peaks))) > 0.01, 'it can be heard');
+  // the chart: a click goes to a bar, and the set plays on from there
+  await page.evaluate(() => window.soundwerk.wall.frameAll());
+  await page.waitForTimeout(400);
+  const chart = page.locator(`.mod[data-id="${id}"] canvas`).first();
+  const box = await chart.boundingBox(), side = 16 / (await chart.evaluate((c) => c.width));
+  const xOf = (bar) => box.x + box.width * (side + (bar / 44) * (1 - 2 * side)), y = box.y + box.height * 0.3;
+  await page.mouse.click(xOf(30), y);
+  await page.waitForFunction(() => window.soundwerk.conductor.at === 30 * 16 && window.soundwerk.conductor.step >= 30 * 16, null, { timeout: 15000 });
+  assert.equal(await page.evaluate(() => Math.abs(window.soundwerk.conductor.base % 16)), 0, 'it landed on a bar');
+  assert.equal(await page.evaluate((x) => window.soundwerk.host.ui(x)[0], id), 1, 'the track it landed in plays');
+  // a drag marks a stretch: it opens the chat and leaves the music alone
+  await page.mouse.move(xOf(22), y);
+  await page.mouse.down();
+  await page.mouse.move(xOf(24), y, { steps: 4 });
+  await page.mouse.move(xOf(26), y, { steps: 4 });
+  await page.mouse.up();
+  const marked = () => page.evaluate(() => { const { conductor } = window.soundwerk; return { mark: conductor.mark, cursor: conductor.cursor, at: conductor.at, running: conductor.running }; });
+  const hold = await marked();
+  assert.deepEqual(hold.mark, { from: 22, to: 26 });
+  assert.equal(hold.at, 30 * 16, 'the set stayed where it was');
+  assert.equal(hold.running, true);
+  assert.match(await page.locator('#chat-mark').textContent(), /Bars 22–26/);
+  await page.fill('#chat-input', 'the hats are too loud here');
+  await page.press('#chat-input', 'Enter');
+  await page.waitForFunction((x) => window.soundwerk.graph.nodes.get(x).data.plan.brief === 'the same set, mended' && !window.soundwerk.chat.busy, id, { timeout: 60000 });
+  assert.match(asked, /\[Marked: bars 22-26 of the set/);
+  assert.match(asked, /Track 1 "2 second\.wav"/);
+  assert.match(asked, /the set on bar \d+/);
+  assert.match(asked, /the hats are too loud here$/);
+  assert.equal(fix.effort, 'low', 'a fix is a small job');
+  assert.match(answered, /What touches bars 16-28 was rendered again/);
+  assert.equal(await page.evaluate((x) => window.soundwerk.graph.nodes.get(x).data.plan.moves.length, id), 2, 'one out, one in');
+  assert.ok(!(await page.evaluate((x) => window.soundwerk.graph.nodes.get(x).data.plan.home.some((h) => h[3] === undefined), id)), 'home stays whole');
+  const after = await marked();
+  assert.equal(after.mark, null);
+  assert.equal(after.running, false, 'a new plan is made from the wall at home');
+  assert.equal(after.cursor, 22 * 16);
+  assert.equal(await page.locator('#chat-mark').isVisible(), false);
+  // ▶ SET goes back to the stretch that was mended
+  await page.locator(`.mod[data-id="${id}"] .set-play`).click();
+  await page.waitForFunction(() => window.soundwerk.conductor.running && window.soundwerk.conductor.at === 22 * 16 && window.soundwerk.conductor.step >= 22 * 16, null, { timeout: 15000 });
+  await page.locator(`.mod[data-id="${id}"] .set-play`).click();
+  await page.waitForFunction(() => !window.soundwerk.conductor.running, null, { timeout: 5000 });
+  assert.equal((await read()).running, false);
+  // the next message doesn't pay for the last one again
+  await page.fill('#chat-input', 'thanks');
+  await page.press('#chat-input', 'Enter');
+  await page.waitForFunction(() => !window.soundwerk.chat.busy, null, { timeout: 15000 });
+  const strings = later.messages.map((m) => (typeof m.content === 'string' ? m.content : ''));
+  assert.equal(strings.filter((c) => c.includes('The plan of the set in full')).length, 1, 'one patch, the latest');
+  assert.ok(later.messages.at(-1).content.includes('The plan of the set in full'));
+  assert.ok(strings.filter((_, i) => later.messages[i].role === 'tool').every((c) => c.length < 410), 'old answers are short');
+  assert.ok(later.messages.flatMap((m) => m.tool_calls ?? []).every((c) => c.function.arguments.length < 410), 'and so are old calls');
+  assert.equal(later.effort, 'medium');
+  await page.unroute('**/api/chat');
+  // teaching: three versions as sound, the prediction sealed, and what was picked goes in the plan
+  let asks = [], bad = true, most = 3;
+  await page.route('**/api/chat', async (route) => {
+    const body = route.request().postDataJSON(), last = body.messages.at(-1).content;
+    asks.push(body);
+    const turn = /^Nothing was offered/.test(last) ? body.messages.findLast((m) => m.role === 'user').content : last;
+    const name = /leg (\d+), side (in|out)/.exec(turn);
+    const reply = (m) => route.fulfill({ json: { message: { role: 'assistant', ...m }, finish: m.tool_calls ? 'tool_calls' : 'stop', usage: { cost: 0 } } });
+    if (!name) return reply({ content: 'All of it is done.' });
+    const { mix } = await page.evaluate(() => ({ mix: [...window.soundwerk.graph.nodes.values()].find((n) => n.type === 'djmix').id }));
+    const bar = { '0:in': 1, '0:out': 14, '1:in': 22, '1:out': 34 }[`${name[1]}:${name[2]}`];
+    const options = [0.2, 0.5, 0.9].slice(0, most).map((fade, i) => ({ title: `version ${i}`, idea: `the fader at ${fade}`, add: [{ at: bad ? 9999 : bar, glide: 0, why: `v${i}`, ops: [{ op: 'set', id: mix, params: { fade } }] }] }));
+    bad = false;
+    return reply({ content: 'I would go for the second one.', blocks: [{ type: 'thinking', thinking: '', signature: 'sealed' }], tool_calls: [{ id: `o${asks.length}`, type: 'function', function: { name: 'offer_transition', arguments: JSON.stringify({ leg: +name[1], side: name[2], options, best: most === 1 ? 0 : 1, why: 'they like it in the middle', notes: ['likes the middle'] }) } }] });
+  });
+  const card = () => page.locator('.chat-item.offer').last();
+  const offered = (n) => page.waitForFunction((k) => !window.soundwerk.chat.busy && document.querySelectorAll('.chat-item.offer').length === k, n, { timeout: 60000 });
+  const teaching = () => page.evaluate((x) => { const { graph, chat } = window.soundwerk, plan = graph.nodes.get(x).data.plan; return { taught: plan.taught ?? [], moves: plan.moves.map((m) => m.why), rounds: chat.taste.rounds, notes: chat.taste.notes, order: chat.round?.order }; }, id);
+  await page.locator(`.mod[data-id="${id}"] .set-teach`).click();
+  await offered(1);
+  assert.equal(asks.length, 3, 'what could not be played never reached the user, and what measured wrong went back once');
+  assert.match(asks[1].messages.at(-1).content, /Nothing was offered\. Fix these/);
+  assert.match(asks[2].messages.at(-1).content, /Nothing was offered yet\. A version has a ✗/);
+  assert.match(await card().locator('.offer-flag').first().textContent(), /^The render flagged: .*(silent|hole|meet)/, 'and what the assistant let stand says what it was, on the version');
+  assert.equal(asks[0].effort, 'low');
+  assert.equal(await card().locator('audio').count(), 3);
+  assert.doesNotMatch(await page.locator('#chat-log').textContent(), /second one|in the middle/, 'the prediction stays sealed');
+  const clips = await card().evaluate(async (el) => Promise.all([...el.querySelectorAll('audio')].map(async (a) => {
+    const bytes = await (await fetch(a.src)).arrayBuffer(), pcm = new Float32Array(bytes, 44);
+    await new Promise((r) => { if (a.readyState >= 1) r(); else a.addEventListener('loadedmetadata', r, { once: true }); });
+    return { seconds: a.duration, peak: pcm.reduce((m, v) => Math.max(m, Math.abs(v)), 0), sum: pcm.reduce((m, v) => m + Math.abs(v), 0) };
+  })));
+  assert.ok(clips.every((c) => c.seconds > 5 && c.peak > 0.01), JSON.stringify(clips));
+  assert.ok(new Set(clips.map((c) => c.seconds.toFixed(3))).size === 1, 'the same bars of each');
+  assert.ok(new Set(clips.map((c) => c.sum.toFixed(0))).size === 3, 'and they sound different');
+  // the second player takes over from the same moment, and the set stops for it
+  await page.evaluate(() => window.soundwerk.host.setRunning(true));
+  const moved = await card().evaluate(async (el) => {
+    const [a, b] = el.querySelectorAll('audio');
+    await a.play();
+    a.currentTime = 3;
+    await new Promise((r) => setTimeout(r, 300));
+    await b.play();
+    await new Promise((r) => setTimeout(r, 100));
+    const out = { a: a.paused, at: b.currentTime };
+    b.pause();
+    return out;
+  });
+  assert.equal(moved.a, true, 'one at a time');
+  assert.ok(moved.at >= 3, `it went on from ${moved.at}`);
+  assert.equal((await read()).running, false, 'the rack stops to let it be heard');
+  // a pick with a reason: it goes in the plan, the prediction opens, and the next transition comes
+  const first = await teaching(), letter = first.order.indexOf(2);
+  await page.fill('#chat-input', 'more of it');
+  await card().getByRole('button', { name: `Pick ${'ABC'[letter]}` }).click();
+  await page.waitForFunction(() => document.querySelector('.offer-said')?.textContent.includes('have been fine too'));
+  assert.equal(await card().getByRole('button', { name: /^Pick/ }).count(), 0, 'it can only be picked once');
+  assert.match(await card().textContent(), /they like it in the middle/, 'the prediction opens with the pick');
+  assert.equal((await teaching()).rounds.length, 0, 'and nothing is scored until they have said if it would have done');
+  await card().getByRole('button', { name: 'No' }).click();
+  await offered(2);
+  const picked = await teaching();
+  assert.deepEqual(picked.taught, ['0:in']);
+  assert.ok(picked.moves.includes('v2'));
+  assert.deepEqual(picked.notes, ['likes the middle']);
+  assert.deepEqual([picked.rounds[0].pick, picked.rounds[0].best, picked.rounds[0].why], [2, 1, 'more of it']);
+  const opened = await page.locator('.chat-item.offer').first().textContent();
+  assert.match(opened, /they like it in the middle/);
+  assert.match(opened, /We agree on 0 of the last 1, and it takes 18 of 20/);
+  assert.equal(await page.locator('.chat-item.offer').first().getByRole('button').count(), 0, 'and it can only be picked once');
+  const said = () => asks.at(-1).messages.findLast((m) => m.role === 'user').content;
+  const told = said();
+  assert.match(told, /\[Picked: your option 2\. You predicted option 1, and that one would not have done\. They said: more of it\]/);
+  assert.match(told, /What this user has taught you, from 1 picks/);
+  assert.ok(asks[2].messages.some((m) => m.blocks), 'thinking goes back within a turn');
+  const newest = asks.at(-1).messages, turn = newest.findLastIndex((m) => m.role === 'user');
+  assert.ok(!newest.slice(0, turn).some((m) => m.blocks), 'and not into the next one, where the turn before has been shortened');
+  assert.match(told, /Transition 2 of 4: the way out of "1 first", leg 0, side out/);
+  // looked at first, it doesn't count
+  await card().getByRole('button', { name: 'Show the recommendation' }).click();
+  assert.match(await card().textContent(), /they like it in the middle.*won't count/);
+  await card().getByRole('button', { name: `Pick ${'ABC'[(await teaching()).order.indexOf(1)]}` }).click();
+  await offered(3);
+  const looked = await teaching();
+  assert.equal(looked.rounds[1].peeked, true);
+  assert.match(await page.locator('.chat-item.offer').nth(1).textContent(), /doesn't count, because you looked first\. We agree on 0 of the last 1/);
+  assert.equal(await page.evaluate(() => window.soundwerk.chat.taste.rounds.filter((r) => !r.peeked).length), 1);
+  // none of them: the plan stays, and the same transition comes again
+  await page.fill('#chat-input', 'too polite');
+  await card().getByRole('button', { name: 'None of them' }).click();
+  await offered(4);
+  const none = await teaching();
+  assert.deepEqual(none.taught, looked.taught);
+  assert.deepEqual(none.moves, looked.moves);
+  assert.equal(none.rounds[2].pick, null);
+  assert.match(said(), /\[None of them: they turned down all three versions of the way into "2 second"\. You predicted option 1\. They said: too polite\]/);
+  assert.match(said(), /Transition 3 of 4/);
+  // eighteen of twenty: it offers to do the rest instead of asking, and only then
+  await page.evaluate(() => { const { chat } = window.soundwerk, r = chat.taste.rounds[0]; chat.learned({ ...chat.taste, rounds: Array.from({ length: 20 }, (_, k) => ({ ...r, pick: k === 5 ? 2 : 1 })) }); });
+  const waited = asks.length;
+  most = 3;
+  await card().getByRole('button', { name: `Pick ${'ABC'[(await teaching()).order.indexOf(0)]}` }).click();
+  await card().getByRole('button', { name: 'Yes, fine' }).click();
+  await page.waitForSelector('.chat-item.trust');
+  assert.equal((await teaching()).rounds.at(-1).fine, true);
+  assert.equal(asks.length, waited, 'no call to the assistant until the user has said');
+  assert.match(await page.locator('.chat-item.trust').textContent(), /19 of the last 20.*1 transition left/);
+  most = 1;
+  await page.getByRole('button', { name: 'Do the rest' }).click();
+  await page.waitForFunction(() => !window.soundwerk.chat.busy, null, { timeout: 60000 });
+  const done = await teaching();
+  assert.deepEqual(done.taught, ['0:in', '0:out', '1:in', '1:out'], 'every transition has been made');
+  assert.equal(await page.locator('.chat-item.offer').count(), 4, 'with nothing to pick from');
+  assert.match(await page.locator('#chat-log').textContent(), /All of it is done/);
+  await page.evaluate(() => window.soundwerk.chat.writing);
+  assert.equal(JSON.parse(readFileSync(TASTE, 'utf8')).rounds.length, 21, 'every pick is on disk');
+  await page.unroute('**/api/chat');
+  await page.unroute('**/api/stems');
+  await page.evaluate(() => { const { chat } = window.soundwerk; chat.reset(); chat.learned({ notes: [], rounds: [] }); });
+  assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('soundwerk.chat.v1')).items.length), 0);
+});
+
+await step('a MIDI control learned onto a knob turns it, and a MIDI Out plays through the port with the time of the sound', async () => {
+  const sent = await page.evaluate(async () => {
+    const { graph, host, devices } = window.soundwerk;
+    const heard = [], port = { name: 'Fake Port', send: (data, when) => heard.push({ data, when, now: performance.now() }) };
+    devices.midi = { inputs: new Map(), outputs: new Map([['p', port]]) };
+    devices.asked = Promise.resolve();
+    window.fakeMidi = heard;
+    await host.start();
+    host.setRunning(true);
+    const clock = [...graph.nodes.values()].find((n) => n.type === 'clock');
+    const out = graph.addNode('midiout', 3, 0);
+    graph.connect(clock.id, 's16', out.id, 'clk');
+    graph.connect(clock.id, 's16', out.id, 'gate');
+    graph.commit();
+    return out.id;
+  });
+  await page.waitForFunction(() => window.fakeMidi.length > 12);
+  const out = await page.evaluate(() => window.fakeMidi.slice(0, 40).map(({ data, when, now }) => ({ status: data[0], ahead: when - now })));
+  assert.ok(out.some((e) => e.status === 0xf8), 'no clock');
+  assert.ok(out.some((e) => e.status === 0x90), 'no note');
+  assert.ok(out.every((e) => e.ahead > -50 && e.ahead < 250), `stamped ${out.map((e) => Math.round(e.ahead))} ms ahead`);
+  await page.evaluate(() => window.soundwerk.host.setRunning(false));
+
+  const master = await page.evaluate(() => [...window.soundwerk.graph.nodes.values()].find((n) => n.type === 'master').id);
+  await page.locator(`.mod[data-id="${master}"] .dial`).first().click({ button: 'right' });
+  await page.locator('.value-learn').click();
+  await page.waitForFunction(() => window.soundwerk.devices.learning);
+  const moved = await page.evaluate((id) => {
+    const { graph, devices } = window.soundwerk;
+    devices.heard('Fake Port', [0xb0, 21, 127]);
+    const key = Object.keys(graph.midiMap)[0], { name } = graph.midiMap[key];
+    devices.heard('Fake Port', [0xb0, 21, 0]);
+    const low = graph.nodes.get(id).params[name];
+    devices.heard('Fake Port', [0xb0, 21, 127]);
+    return { key, low, high: graph.nodes.get(id).params[name], saved: graph.toJSON().midiMap[key].name === name };
+  }, master);
+  assert.equal(moved.key, '0:21');
+  assert.ok(moved.high > moved.low, 'the knob did not follow');
+  assert.ok(moved.saved, 'it is not in the patch');
+  await page.evaluate((id) => {
+    const { graph, devices } = window.soundwerk;
+    graph.removeNode(id);
+    graph.midiMap = {};
+    graph.commit();
+    devices.midi = null;
+    devices.asked = null;
+  }, sent);
+});
+
+await step('what it learned is a file on disk, that any browser reads and nothing else writes over', async () => {
+  const onDisk = () => JSON.parse(readFileSync(TASTE, 'utf8'));
+  const loaded = async (p = page) => { await p.waitForFunction(() => window.soundwerk?.chat?.tasteLoaded); await p.evaluate(async () => { await window.soundwerk.chat.tasteLoaded; await window.soundwerk.chat.writing; }); };
+  const round = { transition: 'the way into "x"', options: [{ title: 'a', idea: 'b' }], best: 0, pick: 0, why: '' }, noted = problems.length;
+  // what was taught before there was a file moves there, and leaves the browser
+  rmSync(TASTE);
+  await page.evaluate((r) => localStorage.setItem('soundwerk.taste.v1', JSON.stringify({ notes: ['from before'], rounds: [r] })), round);
+  await page.reload();
+  await loaded();
+  assert.deepEqual(onDisk().notes, ['from before']);
+  assert.equal(onDisk().rounds.length, 1);
+  assert.equal(await page.evaluate(() => localStorage.getItem('soundwerk.taste.v1')), null);
+  assert.match(readFileSync(TASTE, 'utf8'), /\n {2}"notes"/, 'readable');
+  // another browser, at the other address, knows it too
+  const other = await browser.newPage();
+  await other.goto(`http://127.0.0.1:${PORT}/`);
+  await loaded(other);
+  assert.deepEqual(await other.evaluate(() => window.soundwerk.chat.taste.notes), ['from before']);
+  await other.close();
+  // a file that was deleted stays deleted: nothing in the browser brings it back
+  rmSync(TASTE);
+  await page.reload();
+  await loaded();
+  assert.equal(await page.evaluate(() => window.soundwerk.chat.taste.rounds.length), 0);
+  assert.equal(existsSync(TASTE), false);
+  // the server is away: the browser holds on to it, and hands it over later
+  await page.route('**/api/taste', (route) => (route.request().method() === 'PUT' ? route.abort() : route.continue()));
+  await page.evaluate((r) => window.soundwerk.chat.learned({ notes: ['held'], rounds: [r] }), round);
+  await page.evaluate(() => window.soundwerk.chat.writing);
+  assert.equal(existsSync(TASTE), false);
+  await page.unroute('**/api/taste');
+  await page.reload();
+  await loaded();
+  assert.deepEqual(onDisk().notes, ['held']);
+  // a file someone broke by hand is left alone
+  writeFileSync(TASTE, '{ my own notes');
+  await page.reload();
+  await loaded();
+  assert.match(await page.locator('#toast').textContent(), /not valid JSON/);
+  await page.evaluate((r) => window.soundwerk.chat.learned({ notes: ['later'], rounds: [r, r] }), round);
+  await page.evaluate(() => window.soundwerk.chat.writing);
+  assert.equal(readFileSync(TASTE, 'utf8'), '{ my own notes');
+  await page.evaluate(() => localStorage.removeItem('soundwerk.taste.v1'));
+  rmSync(TASTE);
+  await page.reload();
+  await loaded();
+  const caused = problems.splice(noted);
+  assert.equal(caused.length, 2, caused.join());
+  assert.match(caused[0], /ERR_FAILED/, 'the save that was blocked');
+  assert.match(caused[1], /status of 500/, 'and the file that was broken');
+});
+
+await step('a demo opened by link leaves the saved wall alone', async () => {
+  await page.waitForTimeout(500);   // the wall's own save
+  const mine = await page.evaluate(() => localStorage.getItem('soundwerk.patch.v1'));
+  assert.ok(mine, 'there is a saved wall to lose');
+  await page.route((url) => url.pathname === '/demo/fixture.json', (route) => route.fulfill({ json: { version: 1, nodes: [{ id: 'n1', type: 'master' }, { id: 'n2', type: 'clock' }], links: [] } }));
+  await page.goto(`http://localhost:${PORT}/?patch=/demo/fixture.json`);
+  await page.waitForFunction(() => window.soundwerk?.graph.nodes.size === 2);
+  await page.evaluate(() => { const { graph } = window.soundwerk; graph.addNode('lfo'); graph.commit(); });
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => localStorage.getItem('soundwerk.patch.v1')), mine);
+  await page.goto(`http://localhost:${PORT}/`);
+  await page.waitForFunction(() => window.soundwerk?.graph.nodes.size > 0);
+  assert.equal(await page.evaluate(() => JSON.stringify(window.soundwerk.graph.toJSON().nodes.map((n) => n.id))), JSON.stringify(JSON.parse(mine).nodes.map((n) => n.id)), 'and it comes back');
+});
+
 await step('the server refuses a foreign Host, a cross-site chat call, and private folders', async () => {
   const base = `http://localhost:${PORT}`;
   const json = { 'Content-Type': 'application/json' };
   const chat = (headers) => fetch(`${base}/api/chat`, { method: 'POST', headers, body: '{"messages":[]}' }).then((r) => r.status);
   assert.equal(await chat({ 'Content-Type': 'text/plain' }), 403);
   assert.equal(await chat({ ...json, Origin: 'https://evil.example' }), 403);
-  for (const path of ['/.git/HEAD', '/.gitignore', '/vault/Home.md', '/VAULT/Home.md', '/node_modules/playwright/package.json', '/NODE_MODULES/playwright/package.json']) {
+  // stems start a Python process, so a page elsewhere must not reach them either
+  const stems = (headers) => fetch(`${base}/api/stems`, { method: 'POST', headers, body: 'x' }).then((r) => r.status);
+  assert.equal(await stems({ 'Content-Type': 'text/plain' }), 403);
+  assert.equal(await stems({ 'Content-Type': 'application/octet-stream', Origin: 'https://evil.example' }), 403);
+  for (const path of ['/api/stems/..%2f..%2fserver.mjs', `/api/stems/${'a'.repeat(64)}/secrets`, `/api/stems/${'a'.repeat(64)}/drums`, '/tools/stems/.cache/x', '/tools/stems/.venv/pyvenv.cfg']) {
+    assert.notEqual((await fetch(base + path)).status, 200, path);
+  }
+  writeFileSync(TASTE, '{"notes":[],"rounds":[]}');
+  for (const path of ['/.git/HEAD', '/.gitignore', '/vault/Home.md', '/VAULT/Home.md', '/node_modules/playwright/package.json', '/NODE_MODULES/playwright/package.json', '/data/interact-taste.json', '/DATA/interact-taste.json']) {
     assert.equal((await fetch(base + path)).status, 404, path);
   }
+  const put = (headers, body = '{"notes":[],"rounds":[]}') => fetch(`${base}/api/taste`, { method: 'PUT', headers, body }).then((r) => r.status);
+  assert.equal(await put({ 'Content-Type': 'text/plain' }), 403);
+  assert.equal(await put({ ...json, Origin: 'https://evil.example' }), 403);
+  assert.equal(await put(json, '{"notes":"x"}'), 400);
+  assert.equal(await put(json), 200);
+  rmSync(TASTE);
   assert.equal((await fetch(`${base}/src/main.js`)).status, 200);
   const raw = await new Promise((ok) => {
     import('node:net').then(({ connect }) => {

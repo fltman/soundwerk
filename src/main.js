@@ -6,15 +6,21 @@ import { Host } from './engine/host.js';
 import { drawSeg } from './wall/widgets.js';
 import { EMPTY, PRESETS } from './presets.js';
 import { CodePanel } from './ui/code.js';
-import { loadInto, restoreFiles } from './ui/files.js';
+import { HOLDS_FILE, loadInto, restoreFiles, splitStems } from './ui/files.js';
+import { addTracks, setSource } from './ui/set.js';
+import { wireSet } from './set/wall.js';
+import { Conductor } from './set/conductor.js';
 import { Chat } from './ai/chat.js';
 import { Devices } from './ui/devices.js';
+import { Plugins } from './ui/plugins.js';
 import { DJ } from './dj/dj.js';
 import { DJPanel } from './ui/dj.js';
 import { PatchwerkLink } from './link/patchwerk.js';
 
 const $ = (id) => document.getElementById(id);
 const PATCH_KEY = 'soundwerk.patch.v1';
+const asked = new URLSearchParams(location.search).get('patch');   // ?patch=/demo/x.json opens a saved demo
+const demo = asked?.startsWith('/demo/') ? asked : null;           // and it leaves your own wall where it is
 const LINK_KEY = 'soundwerk.link.v1';
 
 const graph = new Graph();
@@ -34,13 +40,20 @@ function toast(text) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 wall.addEventListener('message', (e) => toast(e.detail.text));
+const conductor = new Conductor({ graph, host, source: setSource });
 const dj = new DJ({ graph, host });
+dj.conductor = conductor;
+host.conductor = conductor;
+conductor.addEventListener('landed', (e) => wall.flash(e.detail.ids));
+conductor.addEventListener('update', () => { if (conductor.message) toast(conductor.message); });
 const chat = new Chat({ graph, wall, host, dj, toast });
 new DJPanel({ dj, graph, chat, wall });
 dj.addEventListener('landed', (e) => wall.flash(e.detail.ids));
 $('ai-btn').onclick = () => chat.toggle();
 window.soundwerk.chat = chat;
 window.soundwerk.dj = dj;
+window.soundwerk.conductor = conductor;
+window.soundwerk.addTracks = (id, files, say) => addTracks(graph, id, files, say);
 const link = new PatchwerkLink({ graph, host, dj });
 const linkBtn = $('link-btn');
 linkBtn.onclick = () => {
@@ -62,6 +75,7 @@ host.addEventListener('module-error', (e) => {
   code.showRuntimeError(id, text);
 });
 window.soundwerk.devices = new Devices(graph, host, wall, toast);
+window.soundwerk.plugins = new Plugins(graph, host, menu, toast);
 window.soundwerk.loadInto = (id, name, data) => loadInto(host, graph, id, name, data);
 
 // ── patch persistence ───────────────────────────────────
@@ -77,6 +91,7 @@ graph.addEventListener('change', (e) => {
 });
 let saveTimer;
 graph.addEventListener('commit', () => {
+  if (demo) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => localStorage.setItem(PATCH_KEY, JSON.stringify(graph.toJSON())), 300);
 });
@@ -146,6 +161,7 @@ wall.addEventListener('view', (e) => { $('zoom-level').textContent = `${Math.rou
 // ── transport ───────────────────────────────────────────
 async function togglePlay() {
   await host.start();
+  if (!host.running && conductor.plan) { await conductor.start(); return; }
   host.setRunning(!host.running);
 }
 $('play').onclick = togglePlay;
@@ -215,7 +231,16 @@ addEventListener('drop', async (e) => {
   if (f.name.endsWith('.json')) { loadPatch(JSON.parse(await f.text())); return; }
   const under = document.elementFromPoint(e.clientX, e.clientY)?.closest('.mod');
   let node = under && graph.nodes.get(under.dataset.id);
-  if (node?.type !== 'deck' && node?.type !== 'sampler') {
+  if (node?.type === 'set') {
+    const files = await Promise.all([...e.dataTransfer.files].map(async (x) => ({ name: x.name, data: await x.arrayBuffer() })));
+    try {
+      wireSet(graph, node.id);
+      await addTracks(graph, node.id, files, toast);
+      toast(`${graph.nodes.get(node.id).data.tracks.length} tracks on the Set: press PLAN`);
+    } catch (err) { toast(`Couldn't load those: ${err.message}`); }
+    return;
+  }
+  if (!HOLDS_FILE.has(node?.type)) {
     node = graph.addNode('deck', 0, 0);
     wall.placeNear(node, wall.toWorld(e.clientX, e.clientY));
     graph.commit();
@@ -224,8 +249,40 @@ addEventListener('drop', async (e) => {
   try {
     const buf = await loadInto(host, graph, node.id, f.name, await f.arrayBuffer());
     graph.commit();
-    toast(buf.bpm ? `${f.name}: ${buf.bpm.toFixed(1)} BPM, the deck's 1/16 out follows its beat` : `${f.name} loaded`);
+    if (buf.slices) toast(`${f.name}: ${buf.slices} slices at ${buf.bpm.toFixed(1)} BPM`);
+    else toast(buf.bpm ? `${f.name}: ${buf.bpm.toFixed(1)} BPM, the deck's 1/16 out follows its beat` : `${f.name} loaded`);
   } catch (err) { toast(`Couldn't load ${f.name}: ${err.message}`); }
+});
+
+host.addEventListener('set-plan', (e) => {
+  wireSet(graph, e.detail.id);
+  chat.toggle(true);
+  chat.setMark(null);
+  chat.send('Plan the set on the wall.');
+});
+host.addEventListener('set-teach', (e) => {
+  wireSet(graph, e.detail.id);
+  chat.setMark(null);
+  chat.teach();
+});
+host.addEventListener('set-play', async () => {
+  if (conductor.running) host.setRunning(false);
+  else await conductor.start().catch((err) => toast(err.message));
+});
+host.addEventListener('set-seek', (e) => {
+  const { bar } = e.detail, { mark } = conductor;
+  if (mark && (bar < mark.from || bar >= mark.to)) chat.setMark(null);
+  conductor.seek(bar * 16);
+});
+host.addEventListener('set-mark', (e) => chat.setMark(e.detail));
+graph.addEventListener('rebuild', () => { conductor.cursor = 0; chat.setMark(null); });
+
+host.addEventListener('stems', async (e) => {
+  try {
+    const { made, skipped } = await splitStems(host, graph, e.detail.id, toast);
+    wall.frameAll();
+    toast(`${made.map((m) => m.stem).join(', ')} on their own Slicers${skipped.length ? `; nothing in ${skipped.join(', ')}` : ''}`);
+  } catch (err) { toast(`Couldn't separate it: ${err.message}`); }
 });
 
 // ── keyboard ────────────────────────────────────────────
@@ -303,5 +360,6 @@ function loop(now) {
 // ── boot ────────────────────────────────────────────────
 let saved = null;
 try { saved = JSON.parse(localStorage.getItem(PATCH_KEY)); } catch { /* ignore */ }
-loadPatch(saved?.nodes?.length ? saved : structuredClone(PRESETS[0].patch()));
+const opened = demo ? await fetch(demo).then((r) => (r.ok ? r.json() : null), () => null) : null;
+loadPatch(opened ?? (saved?.nodes?.length ? saved : structuredClone(PRESETS[0].patch())));
 requestAnimationFrame(loop);

@@ -3,7 +3,9 @@
 import { getDef, inputPorts, outputPorts, paramRange } from '../modules/index.js';
 import { dropAt, findGap, widthOf } from '../rack/place.js';
 import { checkCode } from '../engine/code.js';
-import { parseNotes, parseRows, formatNotes, formatRows } from '../rack/patterns.js';
+import { parseNotes, parseRows, parseSteps, parsePads, formatNotes, formatRows, formatSteps, formatPool } from '../rack/patterns.js';
+import { bpmAt, legsOf } from '../set/score.js';
+import { transitionName, transitionsOf } from '../set/taste.js';
 
 const list = (xs) => xs.join(', ') || '(none)';
 
@@ -138,7 +140,18 @@ export function applyOps(graph, ops, refs = new Map()) {
           graph.setData(id, parseRows(op.rows, node.data));
           return `pattern on ${id}: ${formatRows(node.data)}`;
         }
-        throw new Error(`${label(id)} has no pattern; only bassline and drumseq do`);
+        if (node.type === 'slicer') {
+          if (!node.data.pool.length) throw new Error(`${label(id)} has no track yet: the user must drop an audio file on it`);
+          if (op.steps === undefined && !op.pads) throw new Error('a slicer pattern needs steps, pads or both');
+          const data = { ...node.data };
+          if (op.pads) data.pads = parsePads(op.pads, data);
+          if (op.names) data.names = { ...data.names, ...op.names };
+          if (op.steps !== undefined) data.steps = parseSteps(op.steps);
+          graph.setData(id, data);
+          if (data.steps.length > 16 || data.steps.length < node.params.length) graph.setParam(id, 'length', data.steps.length);
+          return `pattern on ${id}: ${formatSteps(data)} pads ${data.pads.join(' ')}`;
+        }
+        throw new Error(`${label(id)} has no pattern; only bassline, drumseq and slicer do`);
       }
       case 'code': {
         const id = resolve(op.id);
@@ -163,8 +176,53 @@ export function applyOps(graph, ops, refs = new Map()) {
   return { log, added: added.filter((id) => graph.nodes.has(id)), touched: [...touched].filter((id) => graph.nodes.has(id)), cleared };
 }
 
+// A track on a Set as the assistant reads it: what the analysis found, bar by bar
+// What there is to sample, by the stem
+function formatMaterial(t) {
+  const lines = [];
+  for (const [stem, m] of Object.entries(t.material ?? {})) {
+    const hook = m.hook ? `; hook bars ${m.hook.bar}-${m.hook.bar + m.hook.bars}, back on ${m.hook.back.slice(0, 8).join(', ')}${m.hook.back.length > 8 ? ` and ${m.hook.back.length - 8} more` : ''}` : '';
+    lines.push(`    ${stem.padEnd(6)} ${m.map}${hook}${m.rare.length ? `; once only: bar ${m.rare.join(', ')}` : ''}`);
+  }
+  if (t.words?.length) lines.push(`    words: ${t.words.map((w) => `${w.bars.slice(0, 4).join(', ')}${w.bars.length > 4 ? ' …' : ''} "${w.text}" (${w.long})`).join(' | ')}`);
+  return lines.length ? `\n    stems, a digit for every 4 bars from . (nothing) to 9 (the loudest):\n${lines.join('\n')}` : '\n    no stems: only the whole mix can be sampled';
+}
+
+function formatTrack(t, i) {
+  const part = (s) => `${s.name} ${s.from}-${s.to} (level ${s.level}, kicks ${s.kicks}, ${bpmAt(t, s.from).toFixed(1)} BPM)`;
+  return `  track ${i}: "${t.file}", ${t.bpm.toFixed(1)} BPM, ${t.key}, ${t.bars} bars, ${Math.round(t.seconds)} s, highlights at ${t.loudness} LUFS before its own gain of ${t.gain}\n    parts: ${t.sections.map(part).join('; ')}${formatMaterial(t)}`;
+}
+
 // The patch as the assistant sees it: ids, non-default params, patterns, cables with depths.
-export function describePatch(graph, { selected = [] } = {}) {
+// What's in some bars of a set, by the numbers the plan uses
+export function describeBars(plan, tracks, { from, to }) {
+  const lines = [];
+  let bar = 0;
+  for (const part of plan.arc) {
+    if (bar < to && bar + part.bars > from) lines.push(`Part of the arc: ${part.name}, bars ${bar}-${bar + part.bars}.`);
+    bar += part.bars;
+  }
+  for (const leg of legsOf(plan)) {
+    const a = Math.max(from, leg.at), b = Math.min(to, leg.end / 16);
+    if (a < b) lines.push(`Track ${leg.track} "${tracks[leg.track].file}": its bars ${leg.enter + a - leg.at}-${leg.enter + b - leg.at} are heard here. tracks[${leg.index}] plays bars ${leg.at}-${leg.end / 16} of the set.`);
+  }
+  plan.moves.forEach((m, i) => {
+    if (m.at < to && Math.max(m.until ?? 0, m.at + m.glide, m.at + 1) > from) lines.push(`moves[${i}], bar ${m.at}${m.until === undefined ? '' : ` until ${m.until}`}: ${m.why || m.ops.map((op) => op.op).join(', ')}.`);
+  });
+  return lines.join('\n');
+}
+
+// A stretch of a set someone has marked, so an answer can start from there
+export const describeMark = (plan, tracks, mark) => `[Marked: bars ${mark.from}-${mark.to} of the set. The user has listened to them, and this is the stretch they mean.\n${describeBars(plan, tracks, mark)}]`;
+
+// One transition of a set and what is around it, by the numbers an offer uses
+const NEARBY = 32;   // bars on each side
+export function describeTransition(plan, tracks, t) {
+  const all = transitionsOf(plan);
+  return `Transition ${all.findIndex((x) => x.key === t.key) + 1} of ${all.length}: ${transitionName(t, tracks)}, leg ${t.leg}, side ${t.side}. The track ${t.side === 'in' ? 'starts' : 'stops'} on set bar ${t.bar}.\n${describeBars(plan, tracks, { from: Math.max(0, t.bar - NEARBY), to: t.bar + NEARBY })}`;
+}
+
+export function describePatch(graph, { selected = [], pools = false } = {}) {
   const lines = [];
   for (const n of graph.nodes.values()) {
     const def = graph.def(n);
@@ -177,7 +235,15 @@ export function describePatch(graph, { selected = [] } = {}) {
     }
     if (n.type === 'bassline') vals.push(`notes="${formatNotes(n.data)}"`);
     if (n.type === 'drumseq') vals.push(`rows="${formatRows(n.data)}"`);
+    if (n.type === 'slicer') {
+      if (n.data.file) vals.push(`file="${n.data.file}"`, `bpm=${n.data.bpm}`, `key="${n.data.key}"`);
+      if (n.data.stem) vals.push(`stem=${n.data.stem}`);
+      vals.push(`steps="${formatSteps(n.data)}"`, `pads=${n.data.pads.join(',')}`);
+    }
+    if (n.type === 'set') vals.push(`tracks=${n.data.tracks.length}`, n.data.plan ? 'planned' : 'no plan yet');
     lines.push(`${n.id} ${n.type}${vals.length ? ' ' + vals.join(' ') : ''}${selected.includes(n.id) ? '  ← selected' : ''}`);
+    if (pools && n.type === 'slicer' && n.data.pool.length) lines.push(`  pool of ${n.id}:`, formatPool(n.data));
+    if (pools && n.type === 'set') lines.push(...n.data.tracks.map(formatTrack));
   }
   const cables = [...graph.links.values()].map((l) => {
     const to = graph.nodes.get(l.to);

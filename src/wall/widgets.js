@@ -2,6 +2,7 @@
 // the module's shared ui and wave arrays once a frame.
 import { expmap } from '../modules/lib/index.js';
 import { fft, hann } from './fft.js';
+import { legsOf, lengthOf, planOf } from '../set/score.js';
 
 const el = (tag, cls, text) => {
   const e = document.createElement(tag);
@@ -534,6 +535,84 @@ function stepgrid({ node, spec, graph, host }) {
   };
 }
 
+// ── the slicer's grid: a row per pad, one pad a step ────
+const SLICE_COLOR = { bar: '#7fd0ff', beat: '#6fd39a', kick: '#d8452f', snare: '#e88a2d', hat: '#e6c63a' };
+
+function slicegrid({ node, spec, graph, host }) {
+  const c = hiDpi(spec.w, spec.h);
+  c.className = 'grid-canvas';
+  const g = c.getContext('2d');
+  const W = c.width, H = c.height;
+  const LEFT = 150, ROW = H / 8;
+  let playing = -1, pad = -1;
+  const sliceOf = (r) => node.data.pool[node.data.pads[r]];
+  const cols = () => node.data.steps.length;
+  const draw = () => {
+    g.clearRect(0, 0, W, H);
+    g.font = '700 15px Helvetica, Arial, sans-serif';
+    const COL = (W - LEFT) / cols();
+    for (let r = 0; r < 8; r++) {
+      const s = sliceOf(r), color = SLICE_COLOR[s?.kind] ?? '#35373b';
+      g.fillStyle = r + 1 === pad ? '#fff' : color;
+      const name = node.data.names?.['abcdefgh'[r]] ?? s?.kind ?? '';
+      g.fillText(`${'abcdefgh'[r]} ${name}`.slice(0, 16), 6, r * ROW + ROW * 0.68);
+      for (let k = 0; k < cols(); k++) {
+        const on = node.data.steps[k] === r;
+        const x = LEFT + k * COL + 1.5, y = r * ROW + 2;
+        g.fillStyle = on ? color : '#35373b';
+        g.fillRect(x, y, COL - 3, ROW - 4);
+        if (k === playing) {
+          g.fillStyle = 'rgba(255,255,255,0.28)';
+          g.fillRect(x, y, COL - 3, ROW - 4);
+        }
+      }
+    }
+  };
+  let paint = null;
+  // clicking a label moves that pad on to the next slice of the same kind
+  const nextSlice = (r) => {
+    const { pool, pads } = node.data, s = sliceOf(r);
+    if (!s) return;
+    const same = pool.flatMap((x, i) => (x.kind === s.kind ? [i] : []));
+    const out = [...pads];
+    out[r] = same[(same.indexOf(pads[r]) + 1) % same.length];
+    graph.setData(node.id, { ...node.data, pads: out });
+    graph.commit();
+  };
+  const apply = (e) => {
+    const b = c.getBoundingClientRect();
+    const x = ((e.clientX - b.left) / b.width) * W, y = ((e.clientY - b.top) / b.height) * H;
+    const k = Math.floor(((x - LEFT) / (W - LEFT)) * cols()), r = Math.floor(y / ROW);
+    if (k < 0 || k >= cols() || r < 0 || r >= 8 || !sliceOf(r)) return;
+    if (paint.value === undefined) paint.value = node.data.steps[k] === r ? -1 : r;
+    if (node.data.steps[k] === paint.value) return;
+    const steps = [...node.data.steps];
+    steps[k] = paint.value;
+    graph.setData(node.id, { ...node.data, steps });
+  };
+  c.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    const b = c.getBoundingClientRect();
+    if (((e.clientX - b.left) / b.width) * W < LEFT) { nextSlice(Math.floor((((e.clientY - b.top) / b.height) * H) / ROW)); return; }
+    c.setPointerCapture(e.pointerId);
+    paint = {};
+    apply(e);
+  });
+  c.addEventListener('pointermove', (e) => { if (paint) apply(e); });
+  const up = () => { if (paint) { paint = null; graph.commit(); } };
+  c.addEventListener('pointerup', up);
+  c.addEventListener('pointercancel', up);
+  draw();
+  return {
+    el: c,
+    refresh: draw,
+    tick(ui) {
+      const k = host.running ? ui[1] | 0 : -1, now = ui[2] | 0;
+      if (k !== playing || now !== pad) { playing = k; pad = now; draw(); }
+    },
+  };
+}
+
 // ── euclid's ring ───────────────────────────────────────
 function ring({ spec }) {
   const c = hiDpi(spec.w, spec.h);
@@ -566,12 +645,20 @@ function waveform({ node, spec, host }) {
   const name = el('div', 'wave-name', 'DROP A FILE HERE');
   box.append(c, name);
   box.dataset.dropTarget = node.id;
+  const split = spec.stems ? el('button', 'mini wave-btn hidden', 'STEMS') : null;
+  if (split) {
+    split.title = 'Separate this track into drums, bass, vocals and the rest, each on its own Slicer';
+    split.addEventListener('pointerdown', (e) => e.stopPropagation());
+    split.addEventListener('click', () => host.dispatchEvent(new CustomEvent('stems', { detail: { id: node.id } })));
+    box.append(split);
+  }
   const g = c.getContext('2d');
   const W = c.width, H = c.height;
   let drawn = null;
   const still = hiDpi(spec.w, spec.h);
   const tick = (ui) => {
     const buf = host.buffers.get(node.id);
+    split?.classList.toggle('hidden', !buf || !!node.data?.stem);
     if (!buf && drawn) {
       drawn = null;
       name.textContent = 'DROP A FILE HERE';
@@ -598,6 +685,149 @@ function waveform({ node, spec, host }) {
     }
   };
   return { el: box, tick };
+}
+
+// ── a set as a flow chart ───────────────────────────────
+// Time runs left to right. The top lane is the rack, there all the way through, drawn as the parts
+// of the plan; the lane under it is the tracks that come and go in it. Between them, a mark for each
+// move of the plan, as long as its knobs take. A click on the chart, or the playhead dragged, sends
+// the set to that bar; a drag anywhere else marks a stretch to talk to the assistant about.
+const PART_COLOR = { peak: '#ff5a2a', groove: '#7fd0ff', build: '#ffd23f', break: '#3f6f8c', intro: '#5b6670', outro: '#5b6670', transition: '#b58cff' };
+function setflow({ node, spec, host }) {
+  const box = el('div', 'wavebox setbox');
+  const c = hiDpi(spec.w, spec.h), still = hiDpi(spec.w, spec.h);
+  box.append(c);
+  box.dataset.dropTarget = node.id;
+  const button = (text, title, type) => {
+    const b = el('button', `mini set-btn set-${type}`, text);
+    b.title = title;
+    b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    b.addEventListener('click', () => host.dispatchEvent(new CustomEvent(`set-${type}`, { detail: { id: node.id } })));
+    box.append(b);
+    return b;
+  };
+  const teachBtn = button('TEACH', 'One transition at a time: three versions to listen to, you pick one, and the assistant learns what you like', 'teach');
+  const planBtn = button('PLAN', 'Ask the assistant to set up the rack and plan every transition', 'plan');
+  const playBtn = button('▶ SET', 'Play the set from the yellow line', 'play');
+  const g = c.getContext('2d'), W = c.width, H = c.height;
+  const TOP = 20, RACK = 70, TRACK = 118, GAP = 34, SIDE = 16, TEXT = H - 66;
+  const GRAB = 14;   // pixels either side of the playhead that pick it up
+  let drawn = null, total = 1, hand = null;   // hand: { from, to, head }, a press on the chart
+  const xOf = (step) => SIDE + (step / total) * (W - 2 * SIDE);
+  const xAt = (e) => { const r = c.getBoundingClientRect(); return ((e.clientX - r.left) / r.width) * W; };
+  const barAt = (e) => Math.max(0, Math.min(total / 16, Math.round((((xAt(e) - SIDE) / (W - 2 * SIDE)) * total) / 16)));
+  const heading = () => hand && (hand.head || hand.from === hand.to);   // on its way to one bar
+  const markedNow = () => (hand && !heading() ? { from: Math.min(hand.from, hand.to), to: Math.max(hand.from, hand.to) } : host.conductor?.mark);
+  c.addEventListener('pointerdown', (e) => {
+    if (!planOf(node)) return;
+    e.stopPropagation();
+    c.setPointerCapture(e.pointerId);
+    const con = host.conductor, at = con.running ? con.step : con.cursor;
+    hand = { from: barAt(e), to: barAt(e), head: Math.abs(xAt(e) - xOf(at)) < GRAB };
+  });
+  c.addEventListener('pointermove', (e) => { if (hand) hand.to = barAt(e); });
+  c.addEventListener('pointerup', () => {
+    if (!hand) return;
+    const type = heading() ? 'seek' : 'mark', detail = type === 'seek' ? { bar: hand.to } : markedNow();
+    hand = null;
+    host.dispatchEvent(new CustomEvent(`set-${type}`, { detail }));
+  });
+  c.addEventListener('pointercancel', () => { hand = null; });
+  const fit = (s, text, width) => {
+    let t = text;
+    while (t.length > 2 && s.measureText(t).width > width) t = t.slice(0, -1);
+    return t === text ? t : `${t.slice(0, -1)}…`;
+  };
+  const paint = () => {
+    const { tracks } = node.data, plan = planOf(node), s = still.getContext('2d');
+    s.clearRect(0, 0, W, H);
+    s.font = '700 20px Helvetica, Arial, sans-serif';
+    if (!tracks.length) {
+      s.fillStyle = 'rgba(190, 225, 255, 0.75)';
+      s.fillText('DROP A PLAYLIST HERE', SIDE, TOP + 24);
+      return;
+    }
+    if (!plan) {
+      tracks.slice(0, 7).forEach((t, i) => {
+        s.fillStyle = 'rgba(190, 225, 255, 0.85)';
+        s.fillText(fit(s, `${i + 1}  ${t.file}   ${t.bpm.toFixed(1)} BPM   ${t.key}`, W - 2 * SIDE), SIDE, TOP + 22 + i * 40);
+      });
+      if (tracks.length > 7) s.fillText(`and ${tracks.length - 7} more`, SIDE, TOP + 22 + 7 * 40);
+      return;
+    }
+    total = (lengthOf(plan) * 16) || 1;
+    let step = 0;
+    for (const part of plan.arc) {
+      const x0 = xOf(step), x1 = xOf(step + part.bars * 16);
+      s.fillStyle = PART_COLOR[part.name] ?? '#5b6670';
+      s.fillRect(x0, TOP, Math.max(1, x1 - x0 - 1), RACK);
+      s.fillStyle = '#111';
+      s.fillText(fit(s, part.name, x1 - x0 - 8), x0 + 4, TOP + 26);
+      step += part.bars * 16;
+    }
+    const y = TOP + RACK + GAP;
+    for (const m of plan.moves) {
+      s.fillStyle = 'rgba(255,255,255,0.9)';
+      s.fillRect(xOf(m.at * 16), TOP + RACK + 6, Math.max(3, xOf(m.glide * 16) - xOf(0)), GAP - 12);
+      s.fillStyle = '#ffb13b';   // what's sampled, for as long as a Slicer holds it
+      if (m.ops.some((op) => op.op === 'sample')) s.fillRect(xOf(m.at * 16), TOP + RACK + GAP - 5, Math.max(3, xOf((m.until - m.at) * 16) - xOf(0)), 4);
+    }
+    for (const l of legsOf(plan)) {
+      const t = tracks[l.track], x0 = xOf(l.start), x1 = xOf(l.end);
+      for (const part of t.sections) {
+        const a = Math.max(part.from, l.enter), b = Math.min(part.to, l.leave);
+        if (b <= a) continue;
+        const px = xOf(l.start + (a - l.enter) * 16), pw = xOf(l.start + (b - l.enter) * 16) - px;
+        s.fillStyle = PART_COLOR[part.name] ?? '#5b6670';
+        const h = TRACK * (0.45 + 0.55 * part.level);
+        s.fillRect(px, y + TRACK - h, Math.max(1, pw - 1), h);
+      }
+      s.fillStyle = '#fff';
+      s.fillText(fit(s, t.file.replace(/\.\w+$/, ''), x1 - x0 - 10), x0 + 5, y + 22);
+    }
+    if (plan.ok === false) {
+      s.strokeStyle = '#ff3b30';
+      s.lineWidth = 3;
+      s.strokeRect(2, 2, W - 4, TEXT);
+    }
+  };
+  const line = () => {
+    const con = host.conductor, plan = planOf(node), mark = markedNow();
+    if (mark) return `Bars ${mark.from}–${mark.to}: say what's wrong with them in the chat`;
+    if (hand) return `Bar ${hand.to}`;
+    if (con?.running && plan) return plan.moves.find((m) => m.at * 16 > con.step && m.why)?.why ?? '';
+    return plan?.brief ?? '';
+  };
+  const tick = () => {
+    const key = `${node.data.tracks.length}/${JSON.stringify(planOf(node))}`;
+    if (key !== drawn) { drawn = key; paint(); }
+    const con = host.conductor, here = con?.running && con.node?.id === node.id;
+    planBtn.classList.toggle('hidden', !node.data.tracks.length || !!here);
+    teachBtn.classList.toggle('hidden', !node.data.tracks.length || !!here);
+    playBtn.classList.toggle('hidden', !planOf(node));
+    playBtn.textContent = here ? '■ SET' : '▶ SET';
+    g.clearRect(0, 0, W, H);
+    g.drawImage(still, 0, 0);
+    if (planOf(node) && con) {
+      const mark = markedNow();
+      if (mark) {
+        g.fillStyle = 'rgba(255, 210, 63, 0.28)';
+        g.fillRect(xOf(mark.from * 16), TOP - 8, xOf(mark.to * 16) - xOf(mark.from * 16), TEXT - TOP + 4);
+      }
+      g.fillStyle = '#ffd23f';
+      g.fillRect(xOf(heading() ? hand.to * 16 : con.cursor), TOP - 8, 2, TEXT - TOP + 4);
+    }
+    if (here) {
+      const x = xOf(con.step);
+      g.fillStyle = '#fff';
+      g.fillRect(x, TOP - 8, 3, TEXT - TOP + 4);
+    }
+    const text = line();
+    g.font = '20px Helvetica, Arial, sans-serif';
+    g.fillStyle = 'rgba(190, 225, 255, 0.85)';
+    g.fillText(fit(g, text, W - 2 * SIDE - 320), SIDE, H - 20);
+  };
+  return { el: box, tick, refresh: () => { drawn = null; } };
 }
 
 // ── a small keyboard, played with the mouse ─────────────
@@ -651,7 +881,59 @@ function keys({ node, spec, host }) {
   return { el: c };
 }
 
-const BUILDERS = { bpm, scope, xy, spectrum, waterfall, vu, pianoroll, stepgrid, ring, waveform, keys };
+// ── which MIDI port ─────────────────────────────────────
+function midiport({ node, spec, graph, host }) {
+  const pick = el('select', 'midi-port');
+  pick.style.width = `${spec.w}px`;
+  pick.style.height = `${spec.h}px`;
+  pick.addEventListener('pointerdown', (e) => e.stopPropagation());
+  pick.addEventListener('change', () => {
+    graph.setData(node.id, { ...node.data, device: pick.value || undefined });
+    graph.commit();
+  });
+  let shown = null;
+  const tick = () => {
+    const names = host.devices?.ports(spec.dir) ?? [], now = JSON.stringify([names, node.data?.device]);
+    if (now === shown) return;
+    shown = now;
+    const first = spec.dir === 'in' ? 'ALL PORTS' : names[0] ?? 'NO PORT';
+    pick.replaceChildren(new Option(first, ''), ...names.slice(spec.dir === 'in' ? 0 : 1).map((n) => new Option(n, n)));
+    pick.value = node.data?.device ?? '';
+  };
+  return { el: pick, tick };
+}
+
+// ── a plugin of this computer ───────────────────────────
+function plugin({ node, spec, host }) {
+  const box = el('div', 'pluginbox');
+  box.style.width = `${spec.w}px`;
+  box.style.height = `${spec.h}px`;
+  const name = el('button', 'plugin-name', 'CHOOSE A PLUGIN');
+  const row = el('div', 'plugin-row');
+  const open = el('button', 'mini hidden', 'WINDOW'), print = el('button', 'mini hidden', 'PRINT');
+  name.title = 'Pick a VST3 or Audio Unit from this computer';
+  open.title = 'Open the plugin\'s own window. What you set there is kept when you close it';
+  print.title = 'Run the file patched into L through the plugin, and keep the result as that file';
+  row.append(open, print);
+  box.append(name, row);
+  for (const b of [name, open, print]) b.addEventListener('pointerdown', (e) => e.stopPropagation());
+  const fail = (e) => host.plugins.toast(e.message);
+  name.addEventListener('click', (e) => host.plugins.choose(node.id, e.clientX, e.clientY).catch(fail));
+  open.addEventListener('click', () => host.plugins.showWindow(node.id).catch(fail));
+  print.addEventListener('click', () => host.plugins.print(node.id, host.plugins.toast).catch(fail));
+  const tick = () => {
+    const s = host.plugins?.statusOf(node.id);
+    if (!s) return;
+    if (name.textContent !== s.text) name.textContent = s.text;
+    name.title = s.error ?? 'Pick a VST3 or Audio Unit from this computer';
+    name.classList.toggle('plugin-error', !!s.error);
+    open.classList.toggle('hidden', !s.window);
+    print.classList.toggle('hidden', !s.ready || !!s.instrument);
+  };
+  return { el: box, tick };
+}
+
+const BUILDERS = { bpm, scope, xy, spectrum, waterfall, vu, pianoroll, stepgrid, slicegrid, ring, waveform, setflow, keys, midiport, plugin };
 
 export function buildWidget(ui, ctx) {
   const make = BUILDERS[ui];

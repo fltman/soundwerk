@@ -46,17 +46,18 @@ export class Host extends EventTarget {
   }
 
   post(msg, transfer) {
-    if (this.held) this.held.push(msg);
+    if (this.held) { this.held.push(msg); if (transfer) this.heldBytes.push(...transfer); }
     else this.node?.port.postMessage(msg, transfer ?? []);
   }
 
   // Whatever fn does to the patch reaches the engine on that step of that Clock, not before.
   at(clock, step, fn) {
     this.held = [];
+    this.heldBytes = [];
     try { fn(); } finally {
       const msgs = this.held;
       this.held = null;
-      this.post({ t: 'at', clock, step, msgs });
+      this.post({ t: 'at', clock, step, msgs }, this.heldBytes);   // files move, a copy would land on the audio thread
     }
   }
 
@@ -80,6 +81,7 @@ export class Host extends EventTarget {
     this.node.port.onmessage = (e) => {
       if (e.data.t === 'rec' && this.recording) this.recording.push(e.data);
       if (e.data.t === 'error') this.dispatchEvent(new CustomEvent('module-error', { detail: e.data }));
+      if (e.data.t === 'midi') this.dispatchEvent(new CustomEvent('midi-out', { detail: e.data }));
     };
     this.node.onprocessorerror = (e) => console.error('the audio engine stopped', e.message ?? e);
     this.node.connect(this.ctx.destination);

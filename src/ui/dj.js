@@ -1,7 +1,6 @@
 // The DJ panel: every group of the rig as a row of pads. The lit pad is playing, the blinking one
 // lands on the next downbeat, the bar under a pad is what the model thought of it, and a struck-out
 // pad failed its test. Click a pad to play it yourself.
-import { sectionAt } from '../dj/choose.js';
 
 const DARING_KEY = 'soundwerk.daring.v1';
 const DRAG = 160;   // pixels for the whole sweep
@@ -115,7 +114,7 @@ export class DJPanel {
   line() {
     const { dj } = this;
     if (!dj.running || dj.played < 0) return dj.message;
-    const s = sectionAt(dj.rig.arc, dj.played);
+    const s = dj.section(dj.played);
     const last = dj.log.at(-1);
     return [
       `bar ${dj.played + 1}`,

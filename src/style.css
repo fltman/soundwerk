@@ -188,6 +188,18 @@ main { flex: 1; position: relative; min-height: 0; }
 .mini { font-size: 8px; font-weight: 700; letter-spacing: 0.08em; padding: 2px 7px; background: linear-gradient(#55575c, #2c2d31); color: #eee; border: 0; border-radius: 2px; cursor: pointer; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
 .grid-canvas { cursor: pointer; touch-action: none; }
 .wavebox { position: relative; background: #0c1216; border-radius: 3px; box-shadow: inset 0 0 6px #000, 0 0 0 1px #000; }
+.wave-btn { position: absolute; right: 4px; bottom: 4px; }
+.value-learn { position: fixed; z-index: 70; }
+.midi-port { background: #111; color: #ddd; border: 1px solid #000; border-radius: 3px; font: 9px ui-monospace, monospace; }
+.pluginbox { display: flex; flex-direction: column; gap: 6px; }
+.plugin-name { flex: 1; background: #0c1216; color: #7fd0ff; border: 0; border-radius: 3px; box-shadow: inset 0 0 6px #000, 0 0 0 1px #000; font: 10px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.plugin-error { color: #ff6a4a; }
+.plugin-row { display: flex; gap: 6px; min-height: 16px; }
+.setbox canvas { cursor: text; }
+.set-btn { position: absolute; bottom: 4px; }
+.set-plan { right: 56px; }
+.set-teach { right: 104px; }
+.set-play { right: 4px; }
 .wave-name { position: absolute; left: 5px; right: 5px; top: 3px; color: rgba(190, 225, 255, 0.75); font: 8px ui-monospace, Menlo, monospace; overflow: hidden; white-space: nowrap; pointer-events: none; }
 
 /* ── add menu ────────────────────────────────────────── */
@@ -234,6 +246,19 @@ main { flex: 1; position: relative; min-height: 0; }
 .chat-item.listen img { width: 260px; border-radius: 5px; border: 1px solid var(--line-2); display: block; }
 .chat-item.error { color: #ff8a8a; font-size: 12px; }
 .chat-status { color: var(--muted); font-size: 12px; font-style: italic; }
+.chat-item.offer, .chat-item.trust { align-self: stretch; max-width: none; background: #15171b; border: 1px solid #2a2e36; border-radius: 6px; padding: 8px 10px; }
+.offer-head { color: #c9b8ff; font-weight: 700; margin-bottom: 8px; }
+.offer-version { padding: 7px 0; border-top: 1px solid #2a2e36; }
+.offer-version b { color: #ffd23f; margin-right: 6px; }
+.offer-version p { margin: 3px 0 6px; color: #c4c7d0; }
+.offer-version audio { display: block; width: 100%; height: 30px; margin-bottom: 6px; }
+.offer-flag { color: #ff8a8a; font-size: 12px; }
+.offer-picked { outline: 1px solid #6d4bd6; outline-offset: 3px; border-radius: 2px; }
+.offer-foot { display: flex; gap: 8px; padding-top: 8px; border-top: 1px solid #2a2e36; }
+.offer-said { padding-top: 8px; color: #e3e5ea; }
+.chat-mark { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px 0; border-top: 1px solid var(--line); color: #ffd23f; font-size: 12px; }
+.chat-mark.hidden { display: none; }
+.chat-mark:not(.hidden) + .chat-form { border-top: 0; }
 .chat-form { display: flex; gap: 8px; padding: 10px 12px 12px; border-top: 1px solid var(--line); align-items: flex-end; }
 .chat-form textarea { flex: 1; resize: none; background: #121317; border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; font-size: 13px; line-height: 1.4; outline: none; }
 .chat-form textarea:focus { border-color: #6d4bd6; }

@@ -32,7 +32,9 @@ export const clock = {
       this.p16 = new Pulse(sr, 2); this.p8 = new Pulse(sr, 2); this.p4 = new Pulse(sr, 2);
       this.pBar = new Pulse(sr, 2); this.pRst = new Pulse(sr, 2);
       this.rate = 0;         // 16ths per sample
+      this.located = false;  // the sequencers were put somewhere by hand: no reset on the next start
     }
+    onMessage(m) { if (m.kind === 'located') this.located = true; }
     // how far the wall has come, in 16ths; steady through swing
     position() { return ((this.n - 1) & ~1) + this.pos; }
     samplesTo(step) { return (step - this.position()) / this.rate; }
@@ -48,7 +50,8 @@ export const clock = {
       if (running && !this.was) {
         // start exactly on the one
         this.n = 0; this.pos = 0; this.oddDue = true;
-        this.pRst.fire();
+        if (!this.located) this.pRst.fire();
+        this.located = false;
         this.step();
       }
       this.was = running;
@@ -87,6 +90,8 @@ export const divider = {
       this.pulses = new Array(8);
       for (let k = 0; k < 8; k++) this.pulses[k] = new Pulse(sr, 2);
     }
+    rewind() { this.n = 0; }
+    advance(n) { this.n += n; }
     tick(i, o) {
       if (this.rst.tick(i[1])) this.n = 0;
       if (this.clk.tick(i[0])) {
@@ -137,6 +142,11 @@ export const bassline = {
       this.pitch = 0; this.acc = 0; this.sld = 0;
     }
     onData(d) { this.steps = d?.steps ?? []; }
+    rewind() { this.k = -1; this.fresh = true; }
+    advance(n, p) {
+      const len = Math.min(p[0], this.steps.length);
+      if (len) this.k = (this.k + n) % len;
+    }
     step(p) {
       const steps = this.steps, len = Math.min(p[0], steps.length);
       if (!len) return;
@@ -214,6 +224,8 @@ export const drumseq = {
       this.acc = 0;
     }
     onData(d) { this.rows = d?.rows ?? []; }
+    rewind() { this.k = -1; }
+    advance(n, p) { this.k = (this.k + n) % p[0]; }
     tick(i, o, p) {
       if (this.rst.tick(i[1])) this.k = -1;
       if (this.clk.tick(i[0])) {
@@ -268,6 +280,17 @@ export const step8 = {
       this.rng = new Rng(1234);
       this.gated = false;
     }
+    move(len, dir) {
+      if (dir === 0) this.k = (this.k + 1) % len;
+      else if (dir === 1) this.k = this.k <= 0 || this.k >= len ? len - 1 : this.k - 1;
+      else if (dir === 2) {
+        if (this.k + this.dirn >= len) this.dirn = -1;
+        else if (this.k + this.dirn < 0) this.dirn = 1;
+        this.k = clamp(this.k + this.dirn, 0, len - 1);
+      } else this.k = Math.floor(this.rng.next() * len);
+    }
+    rewind() { this.k = -1; this.dirn = 1; this.fresh = true; }
+    advance(n, p) { for (let s = 0; s < n; s++) this.move(p[24], p[25]); }
     tick(i, o, p) {
       if (this.rst.tick(i[1])) { this.k = -1; this.dirn = 1; this.fresh = true; }
       const len = p[24], dir = p[25];
@@ -277,13 +300,7 @@ export const step8 = {
         if (!this.fresh) this.period = this.since;
         this.fresh = false;
         this.since = 0;
-        if (dir === 0) this.k = (this.k + 1) % len;
-        else if (dir === 1) this.k = this.k <= 0 || this.k >= len ? len - 1 : this.k - 1;
-        else if (dir === 2) {
-          if (this.k + this.dirn >= len) this.dirn = -1;
-          else if (this.k + this.dirn < 0) this.dirn = 1;
-          this.k = clamp(this.k + this.dirn, 0, len - 1);
-        } else this.k = Math.floor(this.rng.next() * len);
+        this.move(len, dir);
         this.gated = p[16 + this.k] > 0.5;
         if (this.gated) this.pulse.fire();
         for (let n = 0; n < 8; n++) this.ui[n] = n === this.k ? 1 : 0;
@@ -333,6 +350,8 @@ export const euclid = {
     }
     // the classic Bresenham form: step k is a hit if the running remainder wraps there
     static hit(k, hits, steps) { return (k * hits) % steps < hits; }
+    rewind() { this.k = -1; }
+    advance(n, p) { this.k = (this.k + n) % p[1]; }
     tick(i, o, p) {
       if (this.rst.tick(i[1])) this.k = -1;
       const steps = p[1], hits = Math.min(p[0], steps), rot = p[2];

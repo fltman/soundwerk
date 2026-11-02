@@ -116,6 +116,11 @@ export class DelayLine {
   }
 }
 
+// A block of audio on its way to a plugin and back, laid out as tools/vst/host.py reads it: a head,
+// the samples of both channels, then room for the MIDI of that block.
+export const PLUGIN_BLOCK = 256, PLUGIN_HEAD = 12, PLUGIN_NOTES = 32;
+export const PLUGIN_FRAME = PLUGIN_HEAD + PLUGIN_BLOCK * 8 + PLUGIN_NOTES * 5;
+
 // Base class of every DSP class. The engine fills in `linked`, `ui`, `wave` and `rack`.
 export class Module {
   constructor(sr) {

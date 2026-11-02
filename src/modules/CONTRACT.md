@@ -115,6 +115,15 @@ Add new modules to the `MODULES` list in `src/modules/index.js`.
 * `wave: true` on the definition gives the instance `this.wave`, a 16384-long `Float32Array` shared
   with the wall, for screens. There are 16 of these.
 * `onMessage(msg)`: optional. One-off messages (a decoded audio file, say). Not during `tick`.
+* `this.outgoing`: an array for a module that talks MIDI. Push `[this.rack.samples, ...bytes]`; once a
+  block the rack hands it to the main thread, which sends it when that sample reaches the speakers.
+* A `{ kind: 'bridge', port }` message gives the Plugin module a port to a plugin on another
+  process (`PLUGIN_FRAME` in `lib/core.js` is what goes over it); `port: null` takes it away. In
+  Node and in a render there is no port, and it passes sound straight through.
+* `rewind()` and `advance(n, p)`: for a module that counts clock pulses. A set can start anywhere, so it sends a counter back to the top, the way a reset would, and tells it `n` pulses went by with nothing sounding. `p` is its params. Nothing fires, and a module that has a reset on the first pulse has to count that pulse as swallowed. Not during `tick`.
+  A module that holds a file is listed in `HOLDS_FILE` in `src/ui/files.js`, which is what brings
+  the file back after an undo or a reload. The Set is not in `HOLDS_FILE`: its files come and go
+  with the set, from `src/set/conductor.js`.
 
 ### Rules that keep it from blowing up
 

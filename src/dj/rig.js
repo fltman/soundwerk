@@ -16,17 +16,18 @@ import { applyOps, coerce } from '../ai/ops.js';
 export const MAX_GROUPS = 8;
 export const MAX_MOVES = 26; // some decision models refuse longer choices
 const EVERY = [1, 2, 4, 8, 16, 32];
-const LIVE_OPS = ['set', 'connect', 'disconnect', 'pattern', 'add'];
+export const LIVE_OPS = ['set', 'connect', 'disconnect', 'pattern', 'add'];
 const NAME = /^[a-z0-9_]{1,32}$/i;
 const DEFAULT_ARC = [{ name: 'groove', bars: 16 }, { name: 'build', bars: 8 }, { name: 'peak', bars: 32 }, { name: 'break', bars: 8 }];
 
-const clone = (graph) => { const g = new Graph(); g.load(graph.toJSON()); return g; };
+export const clone = (graph) => { const g = new Graph(); g.load(graph.toJSON()); return g; };
 
 // Plays a move on a patch and remembers how to take it back. skip leaves ops for the caller to do.
-export function enterMove(graph, move, skip = () => false) {
+// refs: names that outlast the move, for a plan whose later moves reach what an earlier one added.
+export function enterMove(graph, move, skip = () => false, refs = new Map()) {
   const before = [...graph.links.values()].map((l) => ({ ...l }));
   const depths = new Map([...graph.nodes].map(([id, n]) => [id, { ...n.depth }]));
-  const { added, log } = applyOps(graph, move.ops.filter((op) => !skip(op)));
+  const { added, log } = applyOps(graph, move.ops.filter((op) => !skip(op)), refs);
   const made = [...graph.links.keys()].filter((id) => !before.some((l) => l.id === id));
   const lost = before.filter((l) => !graph.links.has(l.id));
   // what each replugged jack's depth was, including none at all, so it goes back with the cable
@@ -70,7 +71,7 @@ export function fingerprint(json) {
   return h >>> 0;
 }
 
-function tidyOp(graph, op) {
+export function tidyOp(graph, op) {
   if (op.op !== 'set') return { ...op };
   const id = String(op.id).toLowerCase() === 'master' ? graph.masterNode()?.id : String(op.id);
   const node = graph.nodes.get(id);

@@ -33,6 +33,16 @@ export const lfo = {
       this.ran = false;
       this.held = 0;
       this.rng = new Rng(4711);
+      this.swallow = false;
+    }
+    // a reset on the first pulse swallows it, so a patched reset costs a pulse
+    rewind() { this.phase = 0; this.count = 0; this.fresh = true; this.swallow = this.linked[1] === 1; }
+    advance(n, p) {
+      if (n <= 0) return;
+      const div = LFO.DIVS[p[2]];
+      this.count = (this.count + n - (this.swallow ? 1 : 0)) % div;
+      this.phase = this.count / div;
+      this.swallow = false;
     }
     tick(i, o, p) {
       const shape = p[1];
@@ -47,7 +57,8 @@ export const lfo = {
           if (!this.fresh) this.period = this.since;
           this.fresh = false;
           this.since = 0;
-          if (++this.count >= n) {
+          if (this.swallow) this.swallow = false;
+          else if (++this.count >= n) {
             this.count = 0;
             this.phase = 0;
             this.held = this.rng.bipolar();

@@ -5,3 +5,8 @@ vault/
 .obsidian/
 .DS_Store
 test/out/
+.venv/
+.cache/
+demo/
+data/
+tools/words/

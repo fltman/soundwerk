@@ -86,7 +86,7 @@ test('the catalogue names every module and reads values in real units', () => {
   const lfo = MODULES.find((d) => d.type === 'lfo');
   assert.match(describeParam(lfo.params[0]), /Hz/);
   assert.ok(systemPrompt().length > 4000);
-  assert.deepEqual(TOOLS.map((t) => t.function.name), ['edit_patch', 'listen', 'set_rig']);
+  assert.deepEqual(TOOLS.map((t) => t.function.name), ['edit_patch', 'listen', 'split_stems', 'list_plugins', 'load_plugin', 'print_plugin', 'set_rig', 'set_plan', 'edit_plan', 'offer_transition']);
 });
 
 test('a ref from an earlier call still works, and the Master is always called master', () => {

@@ -6,7 +6,6 @@ export class AddMenu {
     this.el = document.createElement('div');
     this.el.className = 'add-menu hidden';
     this.input = document.createElement('input');
-    this.input.placeholder = 'Search modules…  (acid, kick, filter, scope)';
     this.list = document.createElement('div');
     this.list.className = 'add-list';
     this.el.append(this.input, this.list);
@@ -29,9 +28,12 @@ export class AddMenu {
 
   get isOpen() { return !this.el.classList.contains('hidden'); }
 
-  open({ x, y, filter = () => true, onPick }) {
+  // `items` puts something else than the modules on it, plugins for instance
+  open({ x, y, filter = () => true, onPick, items = null, placeholder = 'Search modules…  (acid, kick, filter, scope)' }) {
     this.filter = filter;
     this.onPick = onPick;
+    this.given = items;
+    this.input.placeholder = placeholder;
     this.input.value = '';
     this.el.classList.remove('hidden');
     const w = 340, h = 440;
@@ -61,7 +63,7 @@ export class AddMenu {
       return t.startsWith(query) ? 0 : t.includes(query) ? 1 : 2;
     };
     const order = Object.keys(CATEGORIES);
-    this.items = [...MODULES, codeDef]
+    this.items = (this.given ?? [...MODULES, codeDef])
       .filter((d) => this.filter(d) && match(d))
       .sort((a, b) => rank(a) - rank(b) || order.indexOf(a.category) - order.indexOf(b.category));
     this.active = 0;

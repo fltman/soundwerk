@@ -46,3 +46,41 @@ export function parseRows(rows, base) {
 export function formatRows(data) {
   return (data?.rows ?? []).map((r, i) => (r.some(Boolean) ? `${DRUM_ROWS[i]} ${r.map((v) => (v ? 'x' : '.')).join('')}` : null)).filter(Boolean).join(' | ');
 }
+
+// slicer steps: "a...b...a.c.b..." a pad on that step, . lets what's playing ring on
+export const PAD_NAMES = 'abcdefgh';
+
+export function parseSteps(text) {
+  const t = String(text).replace(/\s+/g, '').toLowerCase();
+  if (t.length > 64) throw new Error(`steps are at most 64 long, four bars (got ${t.length})`);
+  return Array.from({ length: Math.max(16, Math.ceil(t.length / 16) * 16) }, (_, k) => {
+    const c = t[k] ?? '.';
+    if (c === '.' || c === '-') return -1;
+    const n = PAD_NAMES.indexOf(c);
+    if (n < 0) throw new Error(`"${c}" is not a pad (pads ${PAD_NAMES}, . for nothing)`);
+    return n;
+  });
+}
+
+export function formatSteps(data) {
+  return (data?.steps ?? []).map((n) => PAD_NAMES[n] ?? '.').join('');
+}
+
+// { a: 12, c: 3 } puts those slices of the pool on those pads and leaves the others alone
+export function parsePads(pads, data) {
+  const out = [...data.pads];
+  for (const [name, slice] of Object.entries(pads)) {
+    const n = PAD_NAMES.indexOf(name.toLowerCase());
+    if (n < 0) throw new Error(`no pad "${name}" (pads ${PAD_NAMES})`);
+    if (!Number.isInteger(slice) || !data.pool[slice]) throw new Error(`no slice ${slice} (the pool has 0..${data.pool.length - 1})`);
+    out[n] = slice;
+  }
+  return out;
+}
+
+const SIDES = ['level', 'low', 'mid', 'high', 'busy'];
+
+// The pool as the assistant reads it: which slice, from where in the track, and what it measures
+export function formatPool(data) {
+  return (data?.pool ?? []).map((s, i) => `#${i} ${s.kind} ${s.at.toFixed(1)}s ${SIDES.map((k) => `${k} ${s[k]}`).join(' ')}${s.kicks?.length ? ` kicks ${s.kicks.length}` : ''}`).join('\n');
+}
